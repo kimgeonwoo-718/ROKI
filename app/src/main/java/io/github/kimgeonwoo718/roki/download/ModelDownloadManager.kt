@@ -6,7 +6,6 @@ import android.net.NetworkCapabilities
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
-import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
@@ -26,8 +25,12 @@ class ModelDownloadManager(context: Context, private val storage: ModelStorage) 
     private fun workName(spec: ModelSpec) = "model-download-${spec.id}"
 
     /**
-     * Starts (or resumes) the download. Without [allowMetered] the work only runs on an unmetered
-     * network, so a Wi-Fi drop never silently continues over mobile data.
+     * Starts (or resumes) the download. Without [allowMetered] the worker only downloads on an
+     * unmetered network, so a Wi-Fi drop never silently continues over mobile data.
+     *
+     * No WorkManager network constraint on purpose: losing it would stop the foreground run, and the
+     * restart would happen in the background where a new foreground service is not allowed. The
+     * worker waits for a suitable network itself (ModelDownloadWorker.awaitNetwork).
      */
     fun start(spec: ModelSpec, allowMetered: Boolean) {
         val request =
@@ -38,11 +41,8 @@ class ModelDownloadManager(context: Context, private val storage: ModelStorage) 
                         ModelDownloadWorker.KEY_ALLOW_METERED to allowMetered,
                     )
                 )
-                .setConstraints(
-                    Constraints.Builder()
-                        .setRequiredNetworkType(if (allowMetered) NetworkType.CONNECTED else NetworkType.UNMETERED)
-                        .build()
-                )
+                .setConstraints(Constraints.NONE)
+                .addTag(if (allowMetered) TAG_ANY_NETWORK else TAG_WIFI_ONLY)
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 10, TimeUnit.SECONDS)
                 .build()
         // KEEP: never start a second worker on the same .part file. Finished work is still replaced.
@@ -69,17 +69,17 @@ class ModelDownloadManager(context: Context, private val storage: ModelStorage) 
     private fun toState(spec: ModelSpec, info: WorkInfo?): DownloadState {
         val partial = storage.partialBytes(spec)
         if (info == null) return DownloadState.Idle(partial)
+        val wifiOnly = TAG_WIFI_ONLY in info.tags
         return when (info.state) {
-            WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED ->
-                DownloadState.Waiting(wifiOnly = info.constraints.requiredNetworkType == NetworkType.UNMETERED)
+            WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED -> DownloadState.Waiting(wifiOnly)
             WorkInfo.State.RUNNING -> {
                 val p = info.progress
                 val done = p.getLong(ModelDownloadWorker.KEY_DONE_BYTES, partial)
                 val total = p.getLong(ModelDownloadWorker.KEY_TOTAL_BYTES, spec.sizeBytes)
-                if (p.getString(ModelDownloadWorker.KEY_PHASE) == ModelDownloadWorker.PHASE_VERIFYING) {
-                    DownloadState.Verifying(done, total)
-                } else {
-                    DownloadState.Downloading(done, total, p.getLong(ModelDownloadWorker.KEY_SPEED_BPS, 0L))
+                when (p.getString(ModelDownloadWorker.KEY_PHASE)) {
+                    ModelDownloadWorker.PHASE_WAITING -> DownloadState.Waiting(wifiOnly)
+                    ModelDownloadWorker.PHASE_VERIFYING -> DownloadState.Verifying(done, total)
+                    else -> DownloadState.Downloading(done, total, p.getLong(ModelDownloadWorker.KEY_SPEED_BPS, 0L))
                 }
             }
             // A finished download whose file has since been deleted is not "done" any more.
@@ -102,6 +102,9 @@ class ModelDownloadManager(context: Context, private val storage: ModelStorage) 
     }
 
     companion object {
+        private const val TAG_WIFI_ONLY = "wifi-only"
+        private const val TAG_ANY_NETWORK = "any-network"
+
         fun isMeteredNetwork(context: Context): Boolean {
             val cm = context.getSystemService(ConnectivityManager::class.java)
             val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false

@@ -76,6 +76,11 @@ class ChatController(
     }
 
     private suspend fun runTurn(turnId: Long, prompt: String) {
+        // Not enough room left in the live KV cache for this prompt plus an answer: rebuild trimmed
+        // up front instead of letting the answer be cut off when the cache fills.
+        engine.tokenCount()?.let { used ->
+            if (used + estimateTokens(prompt) + OUTPUT_RESERVE_TOKENS > spec.maxNumTokens) engine.resetConversation()
+        }
         // A context overflow before any output is retried once on a fresh, trimmed Conversation.
         var outcome = generateOnce(turnId, prompt)
         if (outcome is GenerationEvent.Error && outcome.error == LlmError.CONTEXT_FULL && !hasOutput(turnId)) {
@@ -104,7 +109,9 @@ class ChatController(
         var firstChunkAt = 0L
         var chunkCount = 0
         var outcome: GenerationEvent? = null
-        engine.generate(prompt, settings, history, DEFAULT_MAX_OUTPUT_TOKENS).collect { event ->
+        // No output cap yet (the max-length setting arrives in stage 4): an answer ends when the
+        // model finishes or the KV cache fills, and the latter is flagged as truncated.
+        engine.generate(prompt, settings, history, maxOutputTokens = null).collect { event ->
             when (event) {
                 is GenerationEvent.Chunk -> {
                     if (firstChunkAt == 0L) firstChunkAt = SystemClock.elapsedRealtimeNanos()
@@ -165,7 +172,7 @@ class ChatController(
      */
     private fun historyMessages(prompt: String): List<Message> {
         var budget =
-            (spec.maxNumTokens * CONTEXT_FILL_RATIO).toInt() - DEFAULT_MAX_OUTPUT_TOKENS -
+            (spec.maxNumTokens * CONTEXT_FILL_RATIO).toInt() - OUTPUT_RESERVE_TOKENS -
                 estimateTokens(DEFAULT_SYSTEM_PROMPT) - estimateTokens(prompt)
         val kept = ArrayDeque<ChatTurn>()
         val completed =
@@ -189,7 +196,8 @@ class ChatController(
     }
 
     companion object {
-        const val DEFAULT_MAX_OUTPUT_TOKENS = 1024
+        /** Room kept free for an answer when deciding how much history fits. */
+        const val OUTPUT_RESERVE_TOKENS = 1024
 
         /** Rebuild the Conversation once the KV cache passes this share (same ratio as AI Edge Gallery). */
         const val CONTEXT_FILL_RATIO = 0.75

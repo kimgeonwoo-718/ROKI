@@ -22,6 +22,7 @@ import java.io.File
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -61,6 +62,7 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
     val state: StateFlow<EngineState> = _state.asStateFlow()
 
     @Volatile private var engine: Engine? = null
+    @Volatile private var loadedBackend: BackendKind? = null
     @Volatile private var conversation: Conversation? = null
     private var conversationSettings: ConversationSettings? = null
 
@@ -101,7 +103,7 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
     }
 
     private fun loadBlocking(spec: ModelSpec, file: File, userInitiated: Boolean) {
-        var notice = examinePreviousLoad()
+        var notice = examinePreviousRun()
         if (!userInitiated && prefs.getBoolean(KEY_AUTOLOAD_BLOCKED, false)) {
             // Loading crashed the app last time: wait for the user instead of crash-looping.
             _state.value = EngineState.Failed(LlmError.OUT_OF_MEMORY, null, EngineNotice.PREVIOUS_LOAD_CRASHED)
@@ -135,6 +137,7 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
                 clearLoadingMarker()
                 prefs.edit().remove(KEY_AUTOLOAD_BLOCKED).commit()
                 engine = candidate
+                loadedBackend = backend
                 if (backend == BackendKind.CPU && lastError != null && notice == null) {
                     notice = EngineNotice.GPU_FAILED_FELL_BACK
                 }
@@ -153,33 +156,40 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
     }
 
     /**
-     * Checks the marker left by a load that never finished, and why the process died.
-     * Only a real crash disables GPU; a swipe from Recents or an app update is ignored.
+     * Checks the markers left by a load or a GPU generation that never finished, and why the
+     * process died. A swipe from Recents or an app update is ignored; a native crash on GPU, or
+     * a memory kill while loading on GPU in the foreground, turns GPU off; any other crash or
+     * memory kill during loading stops automatic loading until the user retries.
      */
-    private fun examinePreviousLoad(): EngineNotice? {
+    private fun examinePreviousRun(): EngineNotice? {
+        val inferAt = prefs.getLong(KEY_INFER_AT, 0L)
+        if (inferAt != 0L) {
+            prefs.edit().remove(KEY_INFER_AT).commit()
+            val exit = exitSince(inferAt)
+            if (exit != null && isCrash(exit)) {
+                Log.i(TAG, "Previous GPU generation crashed: reason=${exit.reason} status=${exit.status}")
+                prefs.edit().putBoolean(KEY_GPU_DISABLED, true).commit()
+                return EngineNotice.GPU_DISABLED_AFTER_CRASH
+            }
+        }
+
         val backend = prefs.getString(KEY_LOADING_BACKEND, null) ?: return null
         val markerAt = prefs.getLong(KEY_LOADING_AT, 0L)
         clearLoadingMarker()
-        val exit =
-            runCatching {
-                context.getSystemService(ActivityManager::class.java)
-                    .getHistoricalProcessExitReasons(context.packageName, 0, 5)
-            }.getOrDefault(emptyList())
-                .filter { it.timestamp >= markerAt }
-                .minByOrNull { it.timestamp }
-                ?: return null
-        val crashed =
-            exit.reason == ApplicationExitInfo.REASON_CRASH_NATIVE ||
-                exit.reason == ApplicationExitInfo.REASON_CRASH ||
-                (exit.reason == ApplicationExitInfo.REASON_SIGNALED && exit.status in FATAL_SIGNALS)
-        val lowMemory = exit.reason == ApplicationExitInfo.REASON_LOW_MEMORY
+        val exit = exitSince(markerAt) ?: return null
+        val crashed = isCrash(exit)
+        // Devices without low-memory-kill reports show the same kill as SIGNALED + SIGKILL.
+        val killed =
+            exit.reason == ApplicationExitInfo.REASON_LOW_MEMORY ||
+                (exit.reason == ApplicationExitInfo.REASON_SIGNALED && exit.status == OsConstants.SIGKILL)
+        val wasVisible = exit.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE
         Log.i(TAG, "Previous load on $backend ended: reason=${exit.reason} status=${exit.status}")
         return when {
-            crashed && backend == BackendKind.GPU.name -> {
+            backend == BackendKind.GPU.name && (crashed || (killed && wasVisible)) -> {
                 prefs.edit().putBoolean(KEY_GPU_DISABLED, true).commit()
                 EngineNotice.GPU_DISABLED_AFTER_CRASH
             }
-            crashed || lowMemory -> {
+            crashed || killed -> {
                 prefs.edit().putBoolean(KEY_AUTOLOAD_BLOCKED, true).commit()
                 EngineNotice.PREVIOUS_LOAD_CRASHED
             }
@@ -187,8 +197,26 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
         }
     }
 
+    /** The first process exit recorded at or after [since]. */
+    private fun exitSince(since: Long): ApplicationExitInfo? =
+        runCatching {
+            context.getSystemService(ActivityManager::class.java)
+                .getHistoricalProcessExitReasons(context.packageName, 0, 5)
+        }.getOrDefault(emptyList())
+            .filter { it.timestamp >= since }
+            .minByOrNull { it.timestamp }
+
+    private fun isCrash(exit: ApplicationExitInfo): Boolean =
+        exit.reason == ApplicationExitInfo.REASON_CRASH_NATIVE ||
+            exit.reason == ApplicationExitInfo.REASON_CRASH ||
+            (exit.reason == ApplicationExitInfo.REASON_SIGNALED && exit.status in FATAL_SIGNALS)
+
     private fun clearLoadingMarker() {
         prefs.edit().remove(KEY_LOADING_BACKEND).remove(KEY_LOADING_AT).commit()
+    }
+
+    private fun clearInferMarker() {
+        prefs.edit().remove(KEY_INFER_AT).apply()
     }
 
     private fun logModelInfo(file: File) {
@@ -216,9 +244,24 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
         callbackFlow {
             val epoch = resetEpoch.get()
             val finished = AtomicBoolean(false)
+            val sentTo = AtomicReference<Conversation?>(null)
+            val recancelled = AtomicBoolean(false)
             val callback =
                 object : MessageCallback {
                     override fun onMessage(message: Message) {
+                        if (resetEpoch.get() != epoch) {
+                            // A cancel that lands between prefill and decode is lost by the runtime:
+                            // cancel this exact Conversation once more (never lock on this native thread).
+                            val conv = sentTo.get()
+                            if (conv != null && recancelled.compareAndSet(false, true)) {
+                                appScope.launch(Dispatchers.IO) {
+                                    synchronized(conversationLock) {
+                                        if (conv.isAlive) runCatching { conv.cancelProcess() }
+                                    }
+                                }
+                            }
+                            return
+                        }
                         // Only the main content; thinking/other channels live in message.channels.
                         val chunk = message.toString()
                         if (chunk.isNotEmpty()) trySend(GenerationEvent.Chunk(chunk))
@@ -226,12 +269,14 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
 
                     override fun onDone() {
                         finished.set(true)
+                        clearInferMarker()
                         trySend(GenerationEvent.Done)
                         close()
                     }
 
                     override fun onError(throwable: Throwable) {
                         finished.set(true)
+                        clearInferMarker()
                         conversationPoisoned = true
                         if (throwable is CancellationException) {
                             trySend(GenerationEvent.Cancelled)
@@ -251,7 +296,12 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
                             conversationPoisoned = true
                             return@withContext false
                         }
+                        // GPU driver faults often surface on the first prefill, not at load time.
+                        if (loadedBackend == BackendKind.GPU) {
+                            prefs.edit().putLong(KEY_INFER_AT, System.currentTimeMillis()).commit()
+                        }
                         synchronized(conversationLock) {
+                            sentTo.set(conv)
                             conv.sendMessageAsync(text, callback, maxOutputToken = maxOutputTokens)
                         }
                         // stop() raced the send: cancel what just started.
@@ -263,6 +313,7 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
                 } catch (t: Throwable) {
                     Log.w(TAG, "Starting generation failed", t)
                     finished.set(true)
+                    clearInferMarker()
                     conversationPoisoned = true
                     trySend(GenerationEvent.Error(classifyGenerationError(t), describe(t)))
                     close()
@@ -350,6 +401,7 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
         conversation = null
         engine?.let { eng -> runCatching { if (eng.isInitialized()) eng.close() } }
         engine = null
+        loadedBackend = null
     }
 
     private fun classifyLoadError(t: Throwable?): LlmError {
@@ -397,6 +449,7 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
         private const val KEY_LOADING_AT = "loading_at"
         private const val KEY_GPU_DISABLED = "gpu_disabled"
         private const val KEY_AUTOLOAD_BLOCKED = "autoload_blocked"
+        private const val KEY_INFER_AT = "gpu_infer_at"
 
         private val FATAL_SIGNALS =
             intArrayOf(OsConstants.SIGSEGV, OsConstants.SIGBUS, OsConstants.SIGABRT, OsConstants.SIGILL, OsConstants.SIGFPE)
