@@ -5,6 +5,7 @@ import android.os.SystemClock
 import android.util.Log
 import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.ThinkingConfig
+import io.github.kimgeonwoo718.roki.data.db.ConversationEntity
 import io.github.kimgeonwoo718.roki.llm.BackendKind
 import io.github.kimgeonwoo718.roki.llm.ConversationSettings
 import io.github.kimgeonwoo718.roki.llm.EngineState
@@ -13,12 +14,18 @@ import io.github.kimgeonwoo718.roki.llm.LlmEngineManager
 import io.github.kimgeonwoo718.roki.llm.LlmError
 import io.github.kimgeonwoo718.roki.llm.ReasoningLevel
 import io.github.kimgeonwoo718.roki.model.ModelSpec
+import io.github.kimgeonwoo718.roki.settings.AnswerLength
+import io.github.kimgeonwoo718.roki.settings.Personalization
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.launch
 
 enum class TurnStatus { WAITING, STREAMING, DONE, STOPPED, ERROR }
@@ -43,6 +50,7 @@ data class ChatTurn(
     val truncated: Boolean = false,
     /** The answer contains letters from scripts the prompt did not use (e.g. stray Japanese/Arabic). */
     val garbled: Boolean = false,
+    val createdAt: Long = System.currentTimeMillis(),
     internal val thinkingStartedAt: Long? = null,
     internal val thoughtChunks: Int = 0,
 ) {
@@ -53,29 +61,40 @@ data class ChatTurn(
         get() = isActive && response.isEmpty() && thinking.isNotEmpty()
 }
 
-data class ChatState(val turns: List<ChatTurn> = emptyList()) {
+data class ChatState(
+    val turns: List<ChatTurn> = emptyList(),
+    /** The archived conversation shown on screen; null for a new chat not saved yet. */
+    val conversationId: Long? = null,
+) {
     val isGenerating: Boolean
         get() = turns.lastOrNull()?.isActive == true
 }
 
 /**
- * Runs generations in the application scope so they survive rotation and leaving the screen.
- * The UI only observes [state].
+ * Runs generations in the application scope so they survive rotation and leaving the screen,
+ * and keeps the chat archive (Room) in sync. The UI only observes [state].
  */
 class ChatController(
     private val engine: LlmEngineManager,
     private val appScope: CoroutineScope,
     private val spec: ModelSpec,
     private val prefs: SharedPreferences,
+    private val repository: ChatRepository,
+    private val personalization: StateFlow<Personalization>,
 ) {
     private val _state = MutableStateFlow(ChatState())
     val state: StateFlow<ChatState> = _state.asStateFlow()
+
+    val conversations: Flow<List<ConversationEntity>> = repository.conversations
 
     private val _reasoningLevel = MutableStateFlow(ReasoningLevel.fromName(prefs.getString(KEY_REASONING, null)))
     val reasoningLevel: StateFlow<ReasoningLevel> = _reasoningLevel.asStateFlow()
 
     private var job: Job? = null
-    private var nextId = 1L
+    private var idCounter = 0L
+
+    /** When each streaming turn was last written to the database (throttles saves). */
+    private val lastSavedAt = ConcurrentHashMap<Long, Long>()
 
     /** Thought chunks of the last finished turn: still in the KV cache until the next send strips them. */
     private var lastTurnThoughtChunks = 0
@@ -87,7 +106,7 @@ class ChatController(
      */
     private fun settingsFor(level: ReasoningLevel?) =
         ConversationSettings(
-            systemPrompt = DEFAULT_SYSTEM_PROMPT,
+            systemPrompt = systemPrompt(),
             temperature = spec.defaultTemperature,
             topK = spec.defaultTopK,
             topP = spec.defaultTopP,
@@ -99,9 +118,30 @@ class ChatController(
      * Sent per message (not in the system prompt) so changing the level never forces a full
      * re-prefill of the history. ChatTurn.prompt and replayed history keep the raw prompt.
      */
-    private fun outgoing(level: ReasoningLevel?, prompt: String): String =
-        level?.takeIf { it.thinks && spec.supportsThinking }?.effortInstruction
-            ?.let { "[$it]\n\n$prompt" } ?: prompt
+    private fun outgoing(level: ReasoningLevel?, prompt: String): String {
+        val effort = level?.takeIf { it.thinks && spec.supportsThinking }?.effortInstruction
+        // A short persona reminder per message: replayed earlier answers in the old style would
+        // otherwise outweigh a changed system prompt for a small model.
+        val tags = listOfNotNull(effort, personalization.value.reminder().ifBlank { null }).joinToString(" / ")
+        return if (tags.isEmpty()) prompt else "[$tags]\n\n$prompt"
+    }
+
+    /** Room kept free for the answer, sized to the chosen 답변길이. */
+    private fun answerReserve(): Int =
+        minOf(
+            when (personalization.value.answerLength) {
+                AnswerLength.SHORT -> 512
+                AnswerLength.MEDIUM -> 1024
+                AnswerLength.LONG -> 3072
+            },
+            spec.maxNumTokens / 4,
+        )
+
+    /**
+     * The base prompt plus the user's persona choices (사용자 맞춤 설정). It is part of the rebuild
+     * key, so a changed choice rebuilds the Conversation (keeping the history) on the next send.
+     */
+    private fun systemPrompt(): String = "$DEFAULT_SYSTEM_PROMPT\n\n${personalization.value.systemInstructions()}"
 
     /** Takes effect from the next message. */
     fun setReasoningLevel(level: ReasoningLevel) {
@@ -112,14 +152,55 @@ class ChatController(
     fun send(text: String) {
         val prompt = text.trim()
         if (prompt.isEmpty() || _state.value.isGenerating) return
-        val turnId = nextId++
+        // The first message of a new chat creates its archive entry, titled after that message.
+        val conversationId = _state.value.conversationId ?: newId().also { id ->
+            repository.createConversation(id, titleFor(prompt), System.currentTimeMillis())
+            _state.update { it.copy(conversationId = id) }
+        }
+        val turnId = newId()
         val backend = (engine.state.value as? EngineState.Ready)?.backend
         val level = if (spec.supportsThinking) _reasoningLevel.value else null
-        _state.update {
-            it.copy(turns = it.turns + ChatTurn(id = turnId, prompt = prompt, backend = backend, reasoningLevel = level))
-        }
+        val turn = ChatTurn(id = turnId, prompt = prompt, backend = backend, reasoningLevel = level)
+        _state.update { it.copy(turns = it.turns + turn) }
+        repository.saveTurn(conversationId, turn, touch = true)
+        lastSavedAt[turnId] = SystemClock.elapsedRealtime()
         job = appScope.launch { runTurn(turnId, prompt, level) }
     }
+
+    /** Shows an archived chat; the model gets its history when the next message is sent. */
+    fun openConversation(id: Long) {
+        if (_state.value.conversationId == id) return
+        stop()
+        job?.cancel()
+        job = null
+        appScope.launch {
+            val turns =
+                try {
+                    repository.loadTurns(id)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "Loading chat $id failed", e)
+                    return@launch
+                }
+            _state.value = ChatState(turns = turns, conversationId = id)
+            lastTurnThoughtChunks = 0
+            engine.resetConversation()
+        }
+    }
+
+    fun renameConversation(id: Long, title: String) {
+        val trimmed = title.trim()
+        if (trimmed.isNotEmpty()) repository.rename(id, trimmed.take(MAX_TITLE_LENGTH))
+    }
+
+    fun deleteConversation(id: Long) {
+        if (_state.value.conversationId == id) newChat()
+        repository.delete(id)
+    }
+
+    /** Time-based ids so the archive can be written asynchronously without waiting for row ids. */
+    private fun newId(): Long = System.currentTimeMillis() * 1000 + (idCounter++ % 1000)
 
     private suspend fun runTurn(turnId: Long, prompt: String, level: ReasoningLevel?) {
         // Not enough room left in the live KV cache for this prompt plus thinking and an answer:
@@ -272,7 +353,7 @@ class ChatController(
         // worth of margin, so a rebuilt Conversation does not trigger another reset right away.
         var budget =
             minOf((spec.maxNumTokens * CONTEXT_FILL_RATIO).toInt(), spec.maxNumTokens - reserveTokens(level)) -
-                OUTPUT_RESERVE_TOKENS - estimateTokens(DEFAULT_SYSTEM_PROMPT) - estimateTokens(outgoing(level, prompt))
+                answerReserve() - estimateTokens(systemPrompt()) - estimateTokens(outgoing(level, prompt))
         val kept = ArrayDeque<ChatTurn>()
         val completed =
             _state.value.turns.filter {
@@ -293,29 +374,43 @@ class ChatController(
      * never fill the KV cache and leave no answer. Never 0 (that means "uncapped" in 0.18.0).
      */
     private fun thinkingFor(level: ReasoningLevel, sent: String): ThinkingConfig {
-        val room = spec.maxNumTokens - estimateTokens(DEFAULT_SYSTEM_PROMPT) - estimateTokens(sent) -
-            OUTPUT_RESERVE_TOKENS - 16
+        val room = spec.maxNumTokens - estimateTokens(systemPrompt()) - estimateTokens(sent) -
+            answerReserve() - 16
         val budget = level.budget(spec.maxNumTokens).coerceAtMost(room).coerceAtLeast(MIN_THINKING_BUDGET)
         return ThinkingConfig(enableThinking = true, thinkingTokenBudget = budget)
     }
 
     /** Room kept free for this turn's thinking and answer. */
     private fun reserveTokens(level: ReasoningLevel?): Int =
-        OUTPUT_RESERVE_TOKENS + (level?.reserveTokens(spec.maxNumTokens) ?: 0)
+        answerReserve() + (level?.reserveTokens(spec.maxNumTokens) ?: 0)
 
     private fun hasOutput(turnId: Long): Boolean =
         _state.value.turns.firstOrNull { it.id == turnId }?.let { it.response.isNotEmpty() || it.thinking.isNotEmpty() } == true
 
+    /**
+     * Updates a turn on screen and in the archive: at most once per second while it streams, and
+     * always once it finishes.
+     */
     private fun updateTurn(id: Long, transform: (ChatTurn) -> ChatTurn) {
-        _state.update { state -> state.copy(turns = state.turns.map { if (it.id == id) transform(it) else it }) }
+        var updated: ChatTurn? = null
+        val state = _state.updateAndGet { state ->
+            // Only a turn that actually changed is saved (ignored post-stop chunks change nothing).
+            state.copy(turns = state.turns.map { if (it.id == id) transform(it).also { t -> if (t != it) updated = t } else it })
+        }
+        val turn = updated ?: return
+        val conversationId = state.conversationId ?: return
+        val now = SystemClock.elapsedRealtime()
+        if (!turn.isActive || now - (lastSavedAt[id] ?: 0L) >= SAVE_INTERVAL_MS) {
+            lastSavedAt[id] = now
+            if (!turn.isActive) lastSavedAt.remove(id)
+            repository.saveTurn(conversationId, turn, touch = !turn.isActive)
+        }
     }
 
     companion object {
         private const val TAG = "ChatController"
         private const val KEY_REASONING = "reasoning_level"
 
-        /** Room kept free for an answer when deciding how much history fits. */
-        const val OUTPUT_RESERVE_TOKENS = 1024
 
         private const val MIN_THINKING_BUDGET = 128
 
@@ -324,12 +419,23 @@ class ChatController(
 
         // Positive wording on purpose: naming the unwanted languages can prime a small model.
         const val DEFAULT_SYSTEM_PROMPT =
-            "당신은 ROKI입니다. 사용자의 휴대폰 안에서 인터넷 없이 동작하는 친절한 AI 어시스턴트입니다. " +
+            "당신은 ROKI입니다. 사용자의 휴대폰 안에서 인터넷 없이 동작하는 AI 어시스턴트입니다. " +
                 "모든 답변은 자연스러운 한국어로 작성하세요. 사용자가 다른 언어로 답해 달라고 직접 요청할 때만 그 언어를 쓰세요. " +
                 "코드, 고유명사, 널리 쓰이는 영어 약어는 원래 표기대로 써도 됩니다."
 
         /** Deliberately pessimistic (about one token per character) since there is no tokenizer API. */
         private fun estimateTokens(text: String): Int = text.length + 8
+
+        private const val SAVE_INTERVAL_MS = 1000L
+        private const val MAX_TITLE_LENGTH = 40
+        private const val AUTO_TITLE_LENGTH = 30
+
+        /** "첫 질문" as the chat title: its first line, whitespace collapsed, cut at 30 characters. */
+        private fun titleFor(prompt: String): String {
+            val firstLine = prompt.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty()
+            val collapsed = firstLine.trim().replace(Regex("\\s+"), " ")
+            return if (collapsed.length > AUTO_TITLE_LENGTH) collapsed.take(AUTO_TITLE_LENGTH) + "…" else collapsed
+        }
 
         // Greek is allowed for math (α, θ, π). Han stays "foreign" except inside a short gloss.
         private val ALLOWED_SCRIPTS =

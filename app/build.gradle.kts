@@ -3,6 +3,8 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.ksp)
+    alias(libs.plugins.room)
 }
 
 // Which model the app uses (see ModelCatalog). Override in gradle.properties or with -Proki.modelId=...
@@ -18,8 +20,8 @@ android {
         applicationId = "io.github.kimgeonwoo718.roki"
         minSdk = 31
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.1.2"
+        versionCode = 4
+        versionName = "0.2.0"
 
         buildConfigField("String", "MODEL_ID", "\"$modelId\"")
         buildConfigField("String", "MODEL_DOWNLOAD_URL", "\"$modelDownloadUrl\"")
@@ -65,5 +67,11 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.litertlm)
     implementation(libs.markdown.renderer.m3)
+    implementation(libs.androidx.room.runtime)
+    ksp(libs.androidx.room.compiler)
     debugImplementation(libs.androidx.compose.ui.tooling)
+}
+
+room {
+    schemaDirectory("$projectDir/schemas")
 }

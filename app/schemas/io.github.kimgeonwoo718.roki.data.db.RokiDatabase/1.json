@@ -1,0 +1,169 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "4f20bef76c3f07855e5e5a64bf0fc206",
+    "entities": [
+      {
+        "tableName": "conversations",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `title` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "turns",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `conversation_id` INTEGER NOT NULL, `prompt` TEXT NOT NULL, `response` TEXT NOT NULL, `thinking` TEXT NOT NULL, `status` TEXT NOT NULL, `error` TEXT, `ttft_millis` INTEGER, `thinking_millis` INTEGER, `tokens_per_second` REAL, `backend` TEXT, `reasoning_level` TEXT, `truncated` INTEGER NOT NULL, `garbled` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, PRIMARY KEY(`id`), FOREIGN KEY(`conversation_id`) REFERENCES `conversations`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "conversationId",
+            "columnName": "conversation_id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "prompt",
+            "columnName": "prompt",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "response",
+            "columnName": "response",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "thinking",
+            "columnName": "thinking",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "error",
+            "columnName": "error",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "ttftMillis",
+            "columnName": "ttft_millis",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "thinkingMillis",
+            "columnName": "thinking_millis",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "tokensPerSecond",
+            "columnName": "tokens_per_second",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "backend",
+            "columnName": "backend",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "reasoningLevel",
+            "columnName": "reasoning_level",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "truncated",
+            "columnName": "truncated",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "garbled",
+            "columnName": "garbled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_turns_conversation_id",
+            "unique": false,
+            "columnNames": [
+              "conversation_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_turns_conversation_id` ON `${TABLE_NAME}` (`conversation_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "conversations",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "conversation_id"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '4f20bef76c3f07855e5e5a64bf0fc206')"
+    ]
+  }
+}

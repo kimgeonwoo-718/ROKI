@@ -23,6 +23,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.outlined.AddComment
@@ -48,6 +49,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -96,11 +98,17 @@ fun ChatScreen(
     onRetryGpu: () -> Unit,
     onRedownload: () -> Unit,
     onForceCpuChange: (Boolean) -> Unit,
+    onOpenDrawer: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     Scaffold(
         topBar = {
             TopAppBar(
+                navigationIcon = {
+                    IconButton(onClick = onOpenDrawer) {
+                        Icon(Icons.Filled.Menu, contentDescription = stringResource(R.string.menu_open_drawer))
+                    }
+                },
                 title = {
                     Column {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -177,7 +185,8 @@ fun ChatScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 } else {
-                    TurnList(chatState.turns)
+                    // A fresh list (scroll position, auto-follow) for each opened chat.
+                    key(chatState.conversationId) { TurnList(chatState.turns) }
                 }
             }
             InputBar(

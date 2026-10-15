@@ -8,12 +8,14 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import io.github.kimgeonwoo718.roki.AppContainer
 import io.github.kimgeonwoo718.roki.RokiApplication
 import io.github.kimgeonwoo718.roki.chat.ChatState
+import io.github.kimgeonwoo718.roki.data.db.ConversationEntity
 import io.github.kimgeonwoo718.roki.download.DownloadState
 import io.github.kimgeonwoo718.roki.llm.EngineState
 import io.github.kimgeonwoo718.roki.llm.LlmError
 import io.github.kimgeonwoo718.roki.llm.ReasoningLevel
 import io.github.kimgeonwoo718.roki.model.ModelLocation
 import io.github.kimgeonwoo718.roki.model.ModelSpec
+import io.github.kimgeonwoo718.roki.settings.Personalization
 import io.github.kimgeonwoo718.roki.system.ResourceUsage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -63,6 +65,21 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ResourceUsage())
 
     val reasoningLevel: StateFlow<ReasoningLevel> = chat.reasoningLevel
+
+    /** The chat archive for the sidebar, newest first. */
+    val conversations: StateFlow<List<ConversationEntity>> =
+        chat.conversations.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val personalization: StateFlow<Personalization> = container.personalizationStore.state
+
+    fun updatePersonalization(transform: (Personalization) -> Personalization) =
+        container.personalizationStore.update(transform)
+
+    fun openConversation(id: Long) = chat.openConversation(id)
+
+    fun renameConversation(id: Long, title: String) = chat.renameConversation(id, title)
+
+    fun deleteConversation(id: Long) = chat.deleteConversation(id)
 
     fun setReasoningLevel(level: ReasoningLevel) = chat.setReasoningLevel(level)
 
