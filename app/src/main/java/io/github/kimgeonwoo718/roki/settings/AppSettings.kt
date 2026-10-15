@@ -7,22 +7,23 @@ import kotlinx.coroutines.flow.asStateFlow
 
 enum class ThemeMode { SYSTEM, LIGHT, DARK }
 
-/** The 설정 screen: appearance, system prompt, sampling and developer options. */
+/**
+ * The 설정 screen: theme, system prompt and temperature. (Answer length lives in
+ * 사용자 맞춤 설정, and the performance line under answers is always shown.)
+ */
 data class AppSettings(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     /** Replaces the built-in base system prompt when not blank (persona lines are still added). */
     val customSystemPrompt: String = "",
     /** null = the model's recommended default. */
     val temperature: Double? = null,
-    /** Hard cap on answer tokens; null = no limit. Thinking tokens are budgeted separately. */
-    val maxAnswerTokens: Int? = null,
-    /** Shows time to first token, tokens per second and backend under each answer. */
-    val developerMode: Boolean = false,
 ) {
     companion object {
         const val MIN_TEMPERATURE = 0.1
         const val MAX_TEMPERATURE = 2.0
-        val MAX_ANSWER_CHOICES: List<Int?> = listOf(null, 256, 512, 1024, 2048)
+
+        /** A longer base prompt would crowd the conversation history out of the context. */
+        const val MAX_SYSTEM_PROMPT_CHARS = 1000
     }
 }
 
@@ -39,9 +40,7 @@ class AppSettingsStore(private val prefs: SharedPreferences) {
             .putString(KEY_SYSTEM_PROMPT, next.customSystemPrompt)
             .apply {
                 if (next.temperature != null) putFloat(KEY_TEMPERATURE, next.temperature.toFloat()) else remove(KEY_TEMPERATURE)
-                if (next.maxAnswerTokens != null) putInt(KEY_MAX_ANSWER, next.maxAnswerTokens) else remove(KEY_MAX_ANSWER)
             }
-            .putBoolean(KEY_DEVELOPER, next.developerMode)
             .apply()
     }
 
@@ -49,17 +48,13 @@ class AppSettingsStore(private val prefs: SharedPreferences) {
         AppSettings(
             themeMode = prefs.getString(KEY_THEME, null)
                 ?.let { name -> ThemeMode.entries.firstOrNull { it.name == name } } ?: ThemeMode.SYSTEM,
-            customSystemPrompt = prefs.getString(KEY_SYSTEM_PROMPT, null).orEmpty(),
+            customSystemPrompt = prefs.getString(KEY_SYSTEM_PROMPT, null).orEmpty().take(AppSettings.MAX_SYSTEM_PROMPT_CHARS),
             temperature = if (prefs.contains(KEY_TEMPERATURE)) prefs.getFloat(KEY_TEMPERATURE, 1f).toDouble() else null,
-            maxAnswerTokens = if (prefs.contains(KEY_MAX_ANSWER)) prefs.getInt(KEY_MAX_ANSWER, 0).takeIf { it > 0 } else null,
-            developerMode = prefs.getBoolean(KEY_DEVELOPER, false),
         )
 
     companion object {
         private const val KEY_THEME = "app_theme"
         private const val KEY_SYSTEM_PROMPT = "app_system_prompt"
         private const val KEY_TEMPERATURE = "app_temperature"
-        private const val KEY_MAX_ANSWER = "app_max_answer_tokens"
-        private const val KEY_DEVELOPER = "app_developer_mode"
     }
 }

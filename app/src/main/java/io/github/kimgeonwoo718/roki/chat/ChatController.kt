@@ -15,6 +15,7 @@ import io.github.kimgeonwoo718.roki.llm.LlmError
 import io.github.kimgeonwoo718.roki.llm.ReasoningLevel
 import io.github.kimgeonwoo718.roki.model.ModelSpec
 import io.github.kimgeonwoo718.roki.settings.AnswerLength
+import io.github.kimgeonwoo718.roki.settings.AppSettings
 import io.github.kimgeonwoo718.roki.settings.Personalization
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.cancellation.CancellationException
@@ -81,6 +82,7 @@ class ChatController(
     private val prefs: SharedPreferences,
     private val repository: ChatRepository,
     private val personalization: StateFlow<Personalization>,
+    private val appSettings: StateFlow<AppSettings>,
 ) {
     private val _state = MutableStateFlow(ChatState())
     val state: StateFlow<ChatState> = _state.asStateFlow()
@@ -107,7 +109,7 @@ class ChatController(
     private fun settingsFor(level: ReasoningLevel?) =
         ConversationSettings(
             systemPrompt = systemPrompt(),
-            temperature = spec.defaultTemperature,
+            temperature = appSettings.value.temperature ?: spec.defaultTemperature,
             topK = spec.defaultTopK,
             topP = spec.defaultTopP,
             thinkingEnabled = spec.supportsThinking && level?.thinks == true,
@@ -141,7 +143,11 @@ class ChatController(
      * The base prompt plus the user's persona choices (사용자 맞춤 설정). It is part of the rebuild
      * key, so a changed choice rebuilds the Conversation (keeping the history) on the next send.
      */
-    private fun systemPrompt(): String = "$DEFAULT_SYSTEM_PROMPT\n\n${personalization.value.systemInstructions()}"
+    private fun systemPrompt(): String {
+        // 설정 화면에서 바꾼 기본 지시가 있으면 그것을 쓰고, 성격·말투 등은 항상 덧붙인다.
+        val base = appSettings.value.customSystemPrompt.take(AppSettings.MAX_SYSTEM_PROMPT_CHARS).ifBlank { DEFAULT_SYSTEM_PROMPT }
+        return "$base\n\n${personalization.value.systemInstructions()}"
+    }
 
     /** Takes effect from the next message. */
     fun setReasoningLevel(level: ReasoningLevel) {
@@ -152,6 +158,7 @@ class ChatController(
     fun send(text: String) {
         val prompt = text.trim()
         if (prompt.isEmpty() || _state.value.isGenerating) return
+        regenPrevious = null
         // The first message of a new chat creates its archive entry, titled after that message.
         val conversationId = _state.value.conversationId ?: newId().also { id ->
             repository.createConversation(id, titleFor(prompt), System.currentTimeMillis())
@@ -220,7 +227,9 @@ class ChatController(
         }
         when (outcome) {
             GenerationEvent.Done -> afterDone(turnId)
-            GenerationEvent.Cancelled -> updateTurn(turnId) { it.copy(status = TurnStatus.STOPPED).withThinkingTime() }
+            GenerationEvent.Cancelled -> updateTurn(turnId) {
+                if (it.isActive) it.copy(status = TurnStatus.STOPPED).withThinkingTime() else it
+            }
             is GenerationEvent.Error ->
                 updateTurn(turnId) {
                     if (it.status == TurnStatus.STOPPED) it
@@ -244,8 +253,8 @@ class ChatController(
         val settings = settingsFor(level)
         val sent = outgoing(level, prompt)
         val thinking = level?.takeIf { settings.thinkingEnabled }?.let { thinkingFor(it, sent) }
-        // No answer-length cap yet (the setting arrives in stage 4): an answer ends when the model
-        // finishes or the KV cache fills, and the latter is flagged as truncated.
+        // No hard output cap (답변길이 in 사용자 맞춤 설정 guides the length): an answer ends when
+        // the model finishes or the KV cache fills, and the latter is flagged as truncated.
         engine.generate(sent, settings, history, maxOutputTokens = null, thinking = thinking).collect { event ->
             when (event) {
                 is GenerationEvent.Thought, is GenerationEvent.Chunk -> {
@@ -322,7 +331,10 @@ class ChatController(
     fun stop() {
         val last = _state.value.turns.lastOrNull() ?: return
         if (!last.isActive) return
-        updateTurn(last.id) { it.copy(status = TurnStatus.STOPPED).withThinkingTime() }
+        // Stopping a regeneration before it wrote anything brings the previous answer back.
+        if (!restorePreviousIfEmpty(last.id)) {
+            updateTurn(last.id) { it.copy(status = TurnStatus.STOPPED).withThinkingTime() }
+        }
         job?.cancel()
         engine.stop()
     }
@@ -332,6 +344,46 @@ class ChatController(
         val started = thinkingStartedAt ?: return this
         if (thinkingMillis != null) return this
         return copy(thinkingMillis = (SystemClock.elapsedRealtimeNanos() - started) / 1_000_000)
+    }
+
+    /**
+     * 다시 생성: replaces the last answer with a new one for the same question. The Conversation is
+     * rebuilt without that answer (no rollback API in LiteRT-LM 0.18.0) and a new random seed is
+     * used, so the answer usually differs (not with 빠른 생성, which decodes greedily).
+     */
+    fun regenerate() {
+        // Only with a working model: otherwise the old answer would be replaced by an error.
+        val ready = engine.state.value as? EngineState.Ready ?: return
+        val last = _state.value.turns.lastOrNull() ?: return
+        if (last.isActive) return
+        val level = if (spec.supportsThinking) _reasoningLevel.value else null
+        regenPrevious = last
+        updateTurn(last.id) {
+            ChatTurn(id = it.id, prompt = it.prompt, backend = ready.backend, reasoningLevel = level, createdAt = it.createdAt)
+        }
+        lastTurnThoughtChunks = 0
+        engine.resetConversation()
+        job = appScope.launch {
+            runTurn(last.id, last.prompt, level)
+            // Failed, or no answer text (only thoughts): keep the previous answer instead.
+            restorePreviousIfEmpty(last.id)
+        }
+    }
+
+    /** The answer being regenerated, restored if the new attempt produces nothing. */
+    @Volatile private var regenPrevious: ChatTurn? = null
+
+    private fun restorePreviousIfEmpty(turnId: Long): Boolean {
+        val previous = regenPrevious?.takeIf { it.id == turnId } ?: return false
+        val current = _state.value.turns.firstOrNull { it.id == turnId } ?: return false
+        if (current.response.isNotEmpty()) {
+            if (!current.isActive) regenPrevious = null
+            return false
+        }
+        regenPrevious = null
+        updateTurn(turnId) { previous }
+        engine.resetConversation()
+        return true
     }
 
     fun newChat() {

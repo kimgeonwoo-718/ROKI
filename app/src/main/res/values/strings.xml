@@ -142,6 +142,27 @@
     <string name="persona_length_medium">중간</string>
     <string name="persona_length_long">길게</string>
 
+    <!-- Long-press menu -->
+    <string name="chat_copy">복사</string>
+    <string name="chat_regenerate">다시 생성</string>
+    <string name="chat_regenerate_mtp_hint">빠른 생성(MTP)이 켜져 있어서 같은 답이 나올 수 있어요</string>
+    <string name="chat_copied">복사했어요</string>
+    <string name="chat_retry">다시 시도</string>
+
+    <!-- 설정 -->
+    <string name="drawer_settings">설정</string>
+    <string name="settings_title">설정</string>
+    <string name="settings_theme">화면 모드</string>
+    <string name="settings_theme_system">시스템</string>
+    <string name="settings_theme_light">라이트</string>
+    <string name="settings_theme_dark">다크</string>
+    <string name="settings_temperature">온도</string>
+    <string name="settings_temperature_desc">낮을수록 정확하고 일정하게, 높을수록 다양하고 창의적으로 답해요. 빠른 생성(MTP)을 켜면 거의 적용되지 않아요.</string>
+    <string name="settings_reset_default">기본값(%1$s)으로</string>
+    <string name="settings_system_prompt">시스템 프롬프트</string>
+    <string name="settings_system_prompt_desc">ROKI가 항상 따르는 기본 지시예요. 사용자 맞춤 설정(성격·말투 등)은 여기에 자동으로 덧붙어요. 다음 메시지부터 적용돼요.</string>
+    <string name="settings_system_prompt_reset">기본값으로 되돌리기</string>
+
     <!-- Menu -->
     <string name="menu_more">더보기</string>
     <string name="usage_line">CPU %1$s  GPU %2$s  RAM %3$s</string>

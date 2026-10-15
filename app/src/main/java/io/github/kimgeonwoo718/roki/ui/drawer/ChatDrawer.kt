@@ -19,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AddComment
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DrawerDefaults
@@ -61,6 +62,7 @@ fun ChatDrawer(
     onRename: (Long, String) -> Unit,
     onDelete: (Long) -> Unit,
     onOpenPersonalization: () -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
     var renaming by remember { mutableStateOf<ConversationEntity?>(null) }
     var deleting by remember { mutableStateOf<ConversationEntity?>(null) }
@@ -112,13 +114,20 @@ fun ChatDrawer(
             }
         }
         HorizontalDivider(Modifier.padding(horizontal = 12.dp))
-        NavigationDrawerItem(
-            label = { Text(stringResource(R.string.drawer_personalization)) },
-            icon = { Icon(Icons.Outlined.Tune, contentDescription = null) },
-            selected = false,
-            onClick = onOpenPersonalization,
-            modifier = Modifier.padding(12.dp),
-        )
+        Column(Modifier.padding(12.dp)) {
+            NavigationDrawerItem(
+                label = { Text(stringResource(R.string.drawer_settings)) },
+                icon = { Icon(Icons.Outlined.Settings, contentDescription = null) },
+                selected = false,
+                onClick = onOpenSettings,
+            )
+            NavigationDrawerItem(
+                label = { Text(stringResource(R.string.drawer_personalization)) },
+                icon = { Icon(Icons.Outlined.Tune, contentDescription = null) },
+                selected = false,
+                onClick = onOpenPersonalization,
+            )
+        }
     }
 
     renaming?.let { conversation ->

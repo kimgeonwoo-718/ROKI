@@ -20,7 +20,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Menu
@@ -100,6 +99,7 @@ fun ChatScreen(
     onRedownload: () -> Unit,
     onForceCpuChange: (Boolean) -> Unit,
     onSpeculativeChange: (Boolean) -> Unit,
+    onRegenerate: () -> Unit,
     onOpenDrawer: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
@@ -208,7 +208,14 @@ fun ChatScreen(
                     )
                 } else {
                     // A fresh list (scroll position, auto-follow) for each opened chat.
-                    key(chatState.conversationId) { TurnList(chatState.turns) }
+                    key(chatState.conversationId) {
+                        TurnList(
+                            turns = chatState.turns,
+                            engineReady = engineState is EngineState.Ready,
+                            speculative = (engineState as? EngineState.Ready)?.speculative == true,
+                            onRegenerate = onRegenerate,
+                        )
+                    }
                 }
             }
             InputBar(
@@ -320,7 +327,7 @@ private fun BannerCard(error: Boolean, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun TurnList(turns: List<ChatTurn>) {
+private fun TurnList(turns: List<ChatTurn>, engineReady: Boolean, speculative: Boolean, onRegenerate: () -> Unit) {
     val listState = rememberLazyListState()
     val last = turns.lastOrNull()
     // Follow the growing answer, but stop following once the user scrolls up to read;
@@ -355,24 +362,30 @@ private fun TurnList(turns: List<ChatTurn>) {
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
-        items(turns, key = { it.id }) { turn -> TurnItem(turn) }
+        // 다시 생성 only for the newest answer, and only when nothing is generating.
+        val canRegenerate = engineReady && last != null && !last.isActive
+        items(turns, key = { it.id }) { turn ->
+            TurnItem(turn, canRegenerate = canRegenerate && turn.id == last.id, speculative = speculative, onRegenerate = onRegenerate)
+        }
     }
 }
 
 @Composable
-private fun TurnItem(turn: ChatTurn) {
+private fun TurnItem(turn: ChatTurn, canRegenerate: Boolean, speculative: Boolean, onRegenerate: () -> Unit) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        // User message: right-aligned bubble.
+        // User message: right-aligned bubble; long-press to copy.
         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-            Text(
-                turn.prompt,
-                modifier = Modifier
-                    .widthIn(max = 320.dp)
-                    .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(20.dp))
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                style = MaterialTheme.typography.bodyLarge,
-            )
+            LongPressMenu(text = turn.prompt, canRegenerate = false, onRegenerate = {}) {
+                Text(
+                    turn.prompt,
+                    modifier = Modifier
+                        .widthIn(max = 320.dp)
+                        .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(20.dp))
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+            }
         }
         // Assistant: optional reasoning, then the answer as Markdown body text without a bubble.
         if (turn.thinking.isNotEmpty()) ThinkingSection(turn)
@@ -384,7 +397,19 @@ private fun TurnItem(turn: ChatTurn) {
                     Text(stringResource(R.string.chat_thinking), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             turn.response.isNotEmpty() ->
-                SelectionContainer { MarkdownText(turn.response, streaming = turn.isActive) }
+                // Long-press: 복사 / 다시 생성 (no text selection, which would steal the long-press).
+                LongPressMenu(
+                    text = turn.response,
+                    canRegenerate = canRegenerate,
+                    onRegenerate = onRegenerate,
+                    enabled = !turn.isActive,
+                    speculativeHint = speculative,
+                ) {
+                    MarkdownText(turn.response, streaming = turn.isActive)
+                }
+        }
+        if (canRegenerate && (turn.status == TurnStatus.ERROR || turn.response.isBlank())) {
+            TextButton(onClick = onRegenerate) { Text(stringResource(R.string.chat_retry)) }
         }
         if (turn.garbled) {
             Text(

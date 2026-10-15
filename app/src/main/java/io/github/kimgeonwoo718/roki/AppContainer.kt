@@ -9,6 +9,7 @@ import io.github.kimgeonwoo718.roki.download.ModelDownloadManager
 import io.github.kimgeonwoo718.roki.llm.LlmEngineManager
 import io.github.kimgeonwoo718.roki.model.ModelCatalog
 import io.github.kimgeonwoo718.roki.model.ModelStorage
+import io.github.kimgeonwoo718.roki.settings.AppSettingsStore
 import io.github.kimgeonwoo718.roki.settings.PersonalizationStore
 import io.github.kimgeonwoo718.roki.system.ResourceMonitor
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -37,10 +38,14 @@ class AppContainer(context: Context) {
     /** Small user preferences (reasoning level, 사용자 맞춤 설정). */
     private val settingsPrefs = appContext.getSharedPreferences("roki_settings", Context.MODE_PRIVATE)
     val personalizationStore = PersonalizationStore(settingsPrefs)
+    val appSettingsStore = AppSettingsStore(settingsPrefs)
 
     private val database = RokiDatabase.create(appContext)
     private val chatRepository = ChatRepository(database.chatDao(), appScope)
 
     val chatController =
-        ChatController(engineManager, appScope, modelSpec, settingsPrefs, chatRepository, personalizationStore.state)
+        ChatController(
+            engineManager, appScope, modelSpec, settingsPrefs, chatRepository,
+            personalizationStore.state, appSettingsStore.state,
+        )
 }

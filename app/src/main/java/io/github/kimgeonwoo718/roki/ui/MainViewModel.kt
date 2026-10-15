@@ -15,6 +15,7 @@ import io.github.kimgeonwoo718.roki.llm.LlmError
 import io.github.kimgeonwoo718.roki.llm.ReasoningLevel
 import io.github.kimgeonwoo718.roki.model.ModelLocation
 import io.github.kimgeonwoo718.roki.model.ModelSpec
+import io.github.kimgeonwoo718.roki.settings.AppSettings
 import io.github.kimgeonwoo718.roki.settings.Personalization
 import io.github.kimgeonwoo718.roki.system.ResourceUsage
 import kotlinx.coroutines.Dispatchers
@@ -79,6 +80,13 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
         chat.conversations.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val personalization: StateFlow<Personalization> = container.personalizationStore.state
+
+    val appSettings: StateFlow<AppSettings> = container.appSettingsStore.state
+
+    fun updateAppSettings(transform: (AppSettings) -> AppSettings) = container.appSettingsStore.update(transform)
+
+    /** 다시 생성: a new answer for the last question. */
+    fun regenerate() = chat.regenerate()
 
     fun updatePersonalization(transform: (Personalization) -> Personalization) =
         container.personalizationStore.update(transform)

@@ -1,10 +1,14 @@
 package io.github.kimgeonwoo718.roki.ui
 
+import android.app.UiModeManager
+import android.graphics.Color
 import android.os.Bundle
+import androidx.activity.SystemBarStyle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.MaterialTheme
@@ -12,6 +16,7 @@ import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Surface
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -28,9 +33,13 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.kimgeonwoo718.roki.R
+import io.github.kimgeonwoo718.roki.RokiApplication
+import io.github.kimgeonwoo718.roki.chat.ChatController
 import io.github.kimgeonwoo718.roki.model.ModelLocation
 import io.github.kimgeonwoo718.roki.ui.chat.ChatScreen
 import io.github.kimgeonwoo718.roki.ui.drawer.ChatDrawer
+import io.github.kimgeonwoo718.roki.settings.ThemeMode
+import io.github.kimgeonwoo718.roki.ui.settings.AppSettingsScreen
 import io.github.kimgeonwoo718.roki.ui.settings.PersonalizationScreen
 import io.github.kimgeonwoo718.roki.ui.setup.ModelSetupScreen
 import io.github.kimgeonwoo718.roki.ui.theme.RokiTheme
@@ -40,8 +49,34 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        val settingsStore = (application as RokiApplication).container.appSettingsStore
         setContent {
-            RokiTheme {
+            val settings by settingsStore.state.collectAsStateWithLifecycle()
+            // Also tell the system, so the splash screen and window background match the chosen
+            // mode instead of flashing the system's mode on every launch (Android 12+ API).
+            LaunchedEffect(settings.themeMode) {
+                getSystemService(UiModeManager::class.java).setApplicationNightMode(
+                    when (settings.themeMode) {
+                        ThemeMode.SYSTEM -> UiModeManager.MODE_NIGHT_AUTO
+                        ThemeMode.LIGHT -> UiModeManager.MODE_NIGHT_NO
+                        ThemeMode.DARK -> UiModeManager.MODE_NIGHT_YES
+                    }
+                )
+            }
+            val darkTheme = when (settings.themeMode) {
+                ThemeMode.SYSTEM -> isSystemInDarkTheme()
+                ThemeMode.LIGHT -> false
+                ThemeMode.DARK -> true
+            }
+            // Status/navigation bar icons must follow the app's theme, not only the system's.
+            DisposableEffect(darkTheme) {
+                val style =
+                    if (darkTheme) SystemBarStyle.dark(Color.TRANSPARENT)
+                    else SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
+                enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+                onDispose {}
+            }
+            RokiTheme(darkTheme = darkTheme) {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     RokiApp()
                 }
@@ -72,16 +107,31 @@ private fun RokiApp(vm: MainViewModel = viewModel(factory = MainViewModel.Factor
     if (location is ModelLocation.Found) {
         // Keeps the chat's saved state (unsent draft, scroll position) while settings are open.
         val chatStateHolder = rememberSaveableStateHolder()
-        var showPersonalization by rememberSaveable { mutableStateOf(false) }
-        if (showPersonalization) {
-            val personalization by vm.personalization.collectAsStateWithLifecycle()
-            BackHandler { showPersonalization = false }
-            PersonalizationScreen(
-                personalization = personalization,
-                onChange = vm::updatePersonalization,
-                onBack = { showPersonalization = false },
-            )
-            return
+        var screen by rememberSaveable { mutableStateOf(Screen.CHAT) }
+        when (screen) {
+            Screen.PERSONALIZATION -> {
+                val personalization by vm.personalization.collectAsStateWithLifecycle()
+                BackHandler { screen = Screen.CHAT }
+                PersonalizationScreen(
+                    personalization = personalization,
+                    onChange = vm::updatePersonalization,
+                    onBack = { screen = Screen.CHAT },
+                )
+                return
+            }
+            Screen.SETTINGS -> {
+                val appSettings by vm.appSettings.collectAsStateWithLifecycle()
+                BackHandler { screen = Screen.CHAT }
+                AppSettingsScreen(
+                    settings = appSettings,
+                    defaultSystemPrompt = ChatController.DEFAULT_SYSTEM_PROMPT,
+                    defaultTemperature = vm.spec.defaultTemperature,
+                    onChange = vm::updateAppSettings,
+                    onBack = { screen = Screen.CHAT },
+                )
+                return
+            }
+            Screen.CHAT -> Unit
         }
 
         // Collected only here, so usage is not polled on the download screen.
@@ -115,7 +165,8 @@ private fun RokiApp(vm: MainViewModel = viewModel(factory = MainViewModel.Factor
                     onOpen = { id -> closeDrawerThen { vm.openConversation(id) } },
                     onRename = vm::renameConversation,
                     onDelete = vm::deleteConversation,
-                    onOpenPersonalization = { closeDrawerThen { showPersonalization = true } },
+                    onOpenPersonalization = { closeDrawerThen { screen = Screen.PERSONALIZATION } },
+                    onOpenSettings = { closeDrawerThen { screen = Screen.SETTINGS } },
                 )
             },
         ) {
@@ -139,6 +190,7 @@ private fun RokiApp(vm: MainViewModel = viewModel(factory = MainViewModel.Factor
                 onRetryGpu = vm::retryWithGpu,
                 onRedownload = vm::deleteModelAndRedownload,
                 onForceCpuChange = vm::setForceCpu,
+                onRegenerate = vm::regenerate,
                 onSpeculativeChange = vm::setSpeculative,
                 onOpenDrawer = { scope.launch { drawerState.open() } },
             )
@@ -160,3 +212,6 @@ private fun RokiApp(vm: MainViewModel = viewModel(factory = MainViewModel.Factor
         )
     }
 }
+
+/** Full-screen destinations shown instead of the chat. */
+private enum class Screen { CHAT, PERSONALIZATION, SETTINGS }
