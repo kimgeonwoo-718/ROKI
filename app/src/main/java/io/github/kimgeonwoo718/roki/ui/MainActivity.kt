@@ -54,6 +54,8 @@ private fun RokiApp(vm: MainViewModel = viewModel(factory = MainViewModel.Factor
         } else null
 
     if (location is ModelLocation.Found) {
+        // Collected only here, so usage is not polled on the download screen.
+        val resourceUsage by vm.resourceUsage.collectAsStateWithLifecycle()
         ChatScreen(
             modelName = vm.spec.displayName,
             engineState = engineState,
@@ -61,6 +63,7 @@ private fun RokiApp(vm: MainViewModel = viewModel(factory = MainViewModel.Factor
             modelBroken = vm.isModelBroken(engineState),
             gpuDisabled = vm.isGpuDisabled,
             forceCpu = forceCpu,
+            resourceUsage = resourceUsage,
             memoryWarning = memoryWarning,
             reasoningLevel = if (vm.spec.supportsThinking) reasoningLevel else null,
             onReasoningLevelChange = vm::setReasoningLevel,

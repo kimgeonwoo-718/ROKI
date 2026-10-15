@@ -14,12 +14,14 @@ import io.github.kimgeonwoo718.roki.llm.LlmError
 import io.github.kimgeonwoo718.roki.llm.ReasoningLevel
 import io.github.kimgeonwoo718.roki.model.ModelLocation
 import io.github.kimgeonwoo718.roki.model.ModelSpec
+import io.github.kimgeonwoo718.roki.system.ResourceUsage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.flow.scan
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -51,6 +53,14 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
         get() = engine.isGpuDisabled
 
     val forceCpu: StateFlow<Boolean> = engine.forceCpu
+
+    /** Polled only while the chat screen collects it; keeps the last CPU value across restarts. */
+    val resourceUsage: StateFlow<ResourceUsage> =
+        container.resourceMonitor.usage
+            .scan(ResourceUsage()) { previous, next ->
+                if (next.cpuPercent == null) next.copy(cpuPercent = previous.cpuPercent) else next
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ResourceUsage())
 
     val reasoningLevel: StateFlow<ReasoningLevel> = chat.reasoningLevel
 

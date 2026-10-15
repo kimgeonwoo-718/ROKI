@@ -6,6 +6,7 @@ import io.github.kimgeonwoo718.roki.download.ModelDownloadManager
 import io.github.kimgeonwoo718.roki.llm.LlmEngineManager
 import io.github.kimgeonwoo718.roki.model.ModelCatalog
 import io.github.kimgeonwoo718.roki.model.ModelStorage
+import io.github.kimgeonwoo718.roki.system.ResourceMonitor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -21,6 +22,7 @@ class AppContainer(context: Context) {
     val modelStorage = ModelStorage(appContext)
     val downloadManager = ModelDownloadManager(appContext, modelStorage)
     val engineManager = LlmEngineManager(appContext, appScope)
+    val resourceMonitor = ResourceMonitor(appContext)
 
     /** Small user preferences until the stage-4 settings screen (DataStore) replaces them. */
     private val settingsPrefs = appContext.getSharedPreferences("roki_settings", Context.MODE_PRIVATE)

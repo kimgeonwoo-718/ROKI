@@ -18,8 +18,8 @@ android {
         applicationId = "io.github.kimgeonwoo718.roki"
         minSdk = 31
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 3
+        versionName = "0.1.2"
 
         buildConfigField("String", "MODEL_ID", "\"$modelId\"")
         buildConfigField("String", "MODEL_DOWNLOAD_URL", "\"$modelDownloadUrl\"")

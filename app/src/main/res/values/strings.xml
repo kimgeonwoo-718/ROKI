@@ -78,10 +78,10 @@
     <string name="chat_stop">중지</string>
     <string name="chat_new">새 대화</string>
     <string name="chat_empty">무엇이든 물어보세요</string>
-    <string name="chat_thinking">생각 중…</string>
+    <string name="chat_thinking">답변 준비 중…</string>
     <string name="chat_stopped">중지됨</string>
     <string name="stats_ttft">첫 토큰 %1$s초</string>
-    <string name="stats_thinking">생각 %1$s초</string>
+    <string name="stats_thinking">숙고 %1$s초</string>
     <string name="stats_rate">약 %1$s 토큰/초</string>
     <string name="stats_reasoning">추론 %1$s</string>
     <string name="chat_garbled">답변에 다른 언어 글자가 섞였어요. 이 답변은 다음 대화의 맥락에서 빼둘게요.</string>
@@ -94,17 +94,18 @@
     <string name="reasoning_high">높음</string>
     <string name="reasoning_very_high">매우높음</string>
     <string name="reasoning_max">최고높음</string>
-    <string name="reasoning_low_desc">짧게 생각하고 빠르게 답해요</string>
-    <string name="reasoning_medium_desc">적당히 생각해요 (기본)</string>
-    <string name="reasoning_high_desc">더 깊게 생각해요</string>
-    <string name="reasoning_very_high_desc">오래 생각해요. 답이 늦게 시작돼요</string>
-    <string name="reasoning_max_desc">가장 오래 생각해요. 몇 분 걸릴 수 있어요</string>
-    <string name="thinking_in_progress">생각하는 중…</string>
-    <string name="thinking_done">생각 과정</string>
-    <string name="thinking_done_seconds">생각 과정 (%1$s초)</string>
+    <string name="reasoning_low_desc">생각 없이 바로 답해요 (가장 빠름)</string>
+    <string name="reasoning_medium_desc">짧게만 생각하고 답해요</string>
+    <string name="reasoning_high_desc">모델이 원래 하는 만큼 생각해요 (기본)</string>
+    <string name="reasoning_very_high_desc">단계별로 풀고 실수가 없는지 확인해요</string>
+    <string name="reasoning_max_desc">나눠서 풀고 다른 방법으로 한 번 더 검증해요. 가장 느려요</string>
+    <string name="thinking_in_progress">숙고하는 중…</string>
+    <string name="thinking_done">숙고 내용</string>
+    <string name="thinking_done_seconds">%1$s초 동안 숙고함</string>
 
     <!-- Menu -->
     <string name="menu_more">더보기</string>
+    <string name="usage_line">CPU %1$s  GPU %2$s  RAM %3$s</string>
     <string name="menu_force_cpu">CPU로만 실행</string>
     <string name="menu_force_cpu_desc">느리지만 답변이 깨질 때 시도해 보세요</string>
 </resources>

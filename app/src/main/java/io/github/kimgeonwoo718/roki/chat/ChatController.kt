@@ -80,17 +80,30 @@ class ChatController(
     /** Thought chunks of the last finished turn: still in the KV cache until the next send strips them. */
     private var lastTurnThoughtChunks = 0
 
-    // Settings screen arrives in stage 4; until then use the model defaults.
-    private val settings =
+    /**
+     * Conversation settings for a reasoning level (sampling uses the model defaults until the
+     * stage-4 settings screen). Only thinking on/off is part of the rebuild key: switching between
+     * the thinking levels reuses the live KV cache, while switching to or from LOW rebuilds it.
+     */
+    private fun settingsFor(level: ReasoningLevel?) =
         ConversationSettings(
             systemPrompt = DEFAULT_SYSTEM_PROMPT,
             temperature = spec.defaultTemperature,
             topK = spec.defaultTopK,
             topP = spec.defaultTopP,
-            thinkingEnabled = spec.supportsThinking,
+            thinkingEnabled = spec.supportsThinking && level?.thinks == true,
         )
 
-    /** Takes effect from the next message; no Conversation rebuild is needed. */
+    /**
+     * The text actually sent: the level's effort instruction in front of the user's prompt.
+     * Sent per message (not in the system prompt) so changing the level never forces a full
+     * re-prefill of the history. ChatTurn.prompt and replayed history keep the raw prompt.
+     */
+    private fun outgoing(level: ReasoningLevel?, prompt: String): String =
+        level?.takeIf { it.thinks && spec.supportsThinking }?.effortInstruction
+            ?.let { "[$it]\n\n$prompt" } ?: prompt
+
+    /** Takes effect from the next message. */
     fun setReasoningLevel(level: ReasoningLevel) {
         _reasoningLevel.value = level
         prefs.edit().putString(KEY_REASONING, level.name).apply()
@@ -113,7 +126,7 @@ class ChatController(
         // rebuild trimmed up front instead of letting the answer be cut off when the cache fills.
         engine.tokenCount()?.let { used ->
             val effective = used - lastTurnThoughtChunks
-            if (effective + estimateTokens(prompt) + reserveTokens(level) > spec.maxNumTokens) {
+            if (effective + estimateTokens(outgoing(level, prompt)) + reserveTokens(level) > spec.maxNumTokens) {
                 engine.resetConversation()
             }
         }
@@ -126,11 +139,12 @@ class ChatController(
         }
         when (outcome) {
             GenerationEvent.Done -> afterDone(turnId)
-            GenerationEvent.Cancelled -> updateTurn(turnId) { it.copy(status = TurnStatus.STOPPED) }
+            GenerationEvent.Cancelled -> updateTurn(turnId) { it.copy(status = TurnStatus.STOPPED).withThinkingTime() }
             is GenerationEvent.Error ->
                 updateTurn(turnId) {
                     if (it.status == TurnStatus.STOPPED) it
                     else it.copy(status = TurnStatus.ERROR, error = outcome.error, errorDetail = outcome.detail)
+                        .withThinkingTime()
                 }
             // The stream ended without a terminal event: never leave the turn spinning.
             else -> updateTurn(turnId) {
@@ -146,10 +160,12 @@ class ChatController(
         var firstChunkAt = 0L
         var chunkCount = 0
         var outcome: GenerationEvent? = null
-        val thinking = level?.let { thinkingFor(it, prompt) }
+        val settings = settingsFor(level)
+        val sent = outgoing(level, prompt)
+        val thinking = level?.takeIf { settings.thinkingEnabled }?.let { thinkingFor(it, sent) }
         // No answer-length cap yet (the setting arrives in stage 4): an answer ends when the model
         // finishes or the KV cache fills, and the latter is flagged as truncated.
-        engine.generate(prompt, settings, history, maxOutputTokens = null, thinking = thinking).collect { event ->
+        engine.generate(sent, settings, history, maxOutputTokens = null, thinking = thinking).collect { event ->
             when (event) {
                 is GenerationEvent.Thought, is GenerationEvent.Chunk -> {
                     val now = SystemClock.elapsedRealtimeNanos()
@@ -225,9 +241,16 @@ class ChatController(
     fun stop() {
         val last = _state.value.turns.lastOrNull() ?: return
         if (!last.isActive) return
-        updateTurn(last.id) { it.copy(status = TurnStatus.STOPPED) }
+        updateTurn(last.id) { it.copy(status = TurnStatus.STOPPED).withThinkingTime() }
         job?.cancel()
         engine.stop()
+    }
+
+    /** Stamps how long the model thought when a turn ends without reaching the answer. */
+    private fun ChatTurn.withThinkingTime(): ChatTurn {
+        val started = thinkingStartedAt ?: return this
+        if (thinkingMillis != null) return this
+        return copy(thinkingMillis = (SystemClock.elapsedRealtimeNanos() - started) / 1_000_000)
     }
 
     fun newChat() {
@@ -249,7 +272,7 @@ class ChatController(
         // worth of margin, so a rebuilt Conversation does not trigger another reset right away.
         var budget =
             minOf((spec.maxNumTokens * CONTEXT_FILL_RATIO).toInt(), spec.maxNumTokens - reserveTokens(level)) -
-                OUTPUT_RESERVE_TOKENS - estimateTokens(DEFAULT_SYSTEM_PROMPT) - estimateTokens(prompt)
+                OUTPUT_RESERVE_TOKENS - estimateTokens(DEFAULT_SYSTEM_PROMPT) - estimateTokens(outgoing(level, prompt))
         val kept = ArrayDeque<ChatTurn>()
         val completed =
             _state.value.turns.filter {
@@ -269,8 +292,8 @@ class ChatController(
      * The level's thinking budget, capped by the room a very long prompt leaves, so thinking can
      * never fill the KV cache and leave no answer. Never 0 (that means "uncapped" in 0.18.0).
      */
-    private fun thinkingFor(level: ReasoningLevel, prompt: String): ThinkingConfig {
-        val room = spec.maxNumTokens - estimateTokens(DEFAULT_SYSTEM_PROMPT) - estimateTokens(prompt) -
+    private fun thinkingFor(level: ReasoningLevel, sent: String): ThinkingConfig {
+        val room = spec.maxNumTokens - estimateTokens(DEFAULT_SYSTEM_PROMPT) - estimateTokens(sent) -
             OUTPUT_RESERVE_TOKENS - 16
         val budget = level.budget(spec.maxNumTokens).coerceAtMost(room).coerceAtLeast(MIN_THINKING_BUDGET)
         return ThinkingConfig(enableThinking = true, thinkingTokenBudget = budget)

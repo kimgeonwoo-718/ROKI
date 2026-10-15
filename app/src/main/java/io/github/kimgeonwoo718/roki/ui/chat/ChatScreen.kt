@@ -59,6 +59,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.kimgeonwoo718.roki.R
 import io.github.kimgeonwoo718.roki.chat.ChatState
@@ -69,6 +70,8 @@ import io.github.kimgeonwoo718.roki.llm.EngineNotice
 import io.github.kimgeonwoo718.roki.llm.EngineState
 import io.github.kimgeonwoo718.roki.llm.LlmError
 import io.github.kimgeonwoo718.roki.llm.ReasoningLevel
+import io.github.kimgeonwoo718.roki.system.GpuSource
+import io.github.kimgeonwoo718.roki.system.ResourceUsage
 import io.github.kimgeonwoo718.roki.ui.formatRate
 import io.github.kimgeonwoo718.roki.ui.formatSeconds
 
@@ -81,6 +84,7 @@ fun ChatScreen(
     modelBroken: Boolean,
     gpuDisabled: Boolean,
     forceCpu: Boolean,
+    resourceUsage: ResourceUsage,
     memoryWarning: String?,
     /** null when the model has no reasoning (thinking) support. */
     reasoningLevel: ReasoningLevel?,
@@ -99,11 +103,18 @@ fun ChatScreen(
             TopAppBar(
                 title = {
                     Column {
-                        Text(stringResource(R.string.app_name), fontWeight = FontWeight.Bold)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(stringResource(R.string.app_name), fontWeight = FontWeight.Bold, maxLines = 1)
+                            Spacer(Modifier.size(10.dp))
+                            UsageText(resourceUsage, Modifier.weight(1f, fill = false))
+                        }
                         Text(
                             engineSubtitle(modelName, engineState),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
                 },
@@ -184,6 +195,22 @@ fun ChatScreen(
             )
         }
     }
+}
+
+/** "CPU 23% · GPU 41% · RAM 62%" ("≈" for the headroom estimate, "-" when unreadable). */
+@Composable
+private fun UsageText(usage: ResourceUsage, modifier: Modifier = Modifier) {
+    fun pct(value: Int?) = value?.let { "$it%" } ?: "-"
+    val gpu = usage.gpu?.let { if (it.source == GpuSource.HEADROOM) "≈${it.percent}%" else "${it.percent}%" } ?: "-"
+    Text(
+        stringResource(R.string.usage_line, pct(usage.cpuPercent), gpu, pct(usage.ramPercent)),
+        modifier = modifier,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1,
+        softWrap = false,
+        overflow = TextOverflow.Ellipsis,
+    )
 }
 
 @Composable
