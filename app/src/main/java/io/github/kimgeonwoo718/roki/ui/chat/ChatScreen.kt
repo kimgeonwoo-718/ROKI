@@ -86,6 +86,7 @@ fun ChatScreen(
     modelBroken: Boolean,
     gpuDisabled: Boolean,
     forceCpu: Boolean,
+    speculative: Boolean,
     resourceUsage: ResourceUsage,
     memoryWarning: String?,
     /** null when the model has no reasoning (thinking) support. */
@@ -98,6 +99,7 @@ fun ChatScreen(
     onRetryGpu: () -> Unit,
     onRedownload: () -> Unit,
     onForceCpuChange: (Boolean) -> Unit,
+    onSpeculativeChange: (Boolean) -> Unit,
     onOpenDrawer: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
@@ -151,6 +153,26 @@ fun ChatScreen(
                                 onClick = {
                                     menuOpen = false
                                     onForceCpuChange(!forceCpu)
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(stringResource(R.string.menu_speculative))
+                                        Text(
+                                            stringResource(R.string.menu_speculative_desc),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                },
+                                trailingIcon = { Checkbox(checked = speculative, onCheckedChange = null) },
+                                // Only meaningful while the model runs on GPU.
+                                enabled = !chatState.isGenerating &&
+                                    (engineState as? EngineState.Ready)?.backend == BackendKind.GPU,
+                                onClick = {
+                                    menuOpen = false
+                                    onSpeculativeChange(!speculative)
                                 },
                             )
                         }
@@ -225,7 +247,10 @@ private fun UsageText(usage: ResourceUsage, modifier: Modifier = Modifier) {
 @Composable
 private fun engineSubtitle(modelName: String, state: EngineState): String =
     when (state) {
-        is EngineState.Ready -> "$modelName · " + stringResource(R.string.engine_ready_backend, state.backend.name)
+        is EngineState.Ready -> "$modelName · " + stringResource(
+            R.string.engine_ready_backend,
+            if (state.speculative) "${state.backend.name}+MTP" else state.backend.name,
+        )
         is EngineState.Loading -> stringResource(R.string.engine_preparing, state.backend.name)
         is EngineState.Failed -> modelName
         EngineState.Idle -> modelName
@@ -481,5 +506,6 @@ fun noticeMessage(notice: EngineNotice): String =
             EngineNotice.GPU_DISABLED_AFTER_CRASH -> R.string.notice_gpu_disabled
             EngineNotice.PREVIOUS_LOAD_CRASHED -> R.string.notice_previous_crash
             EngineNotice.GPU_FAILED_FELL_BACK -> R.string.notice_gpu_fell_back
+            EngineNotice.SPECULATIVE_DISABLED_AFTER_CRASH -> R.string.notice_speculative_disabled
         }
     )

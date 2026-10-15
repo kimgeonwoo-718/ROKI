@@ -15,6 +15,7 @@ import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.ExperimentalApi
+import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.MessageCallback
 import com.google.ai.edge.litertlm.ModelInfo
@@ -93,6 +94,27 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
     private val cpuOnly: Boolean
         get() = isGpuDisabled || _forceCpu.value
 
+    /**
+     * "빠른 생성": multi-token prediction (speculative decoding) on GPU. Opt-in: LiteRT-LM's MTP
+     * drafter and verifier sample greedily, so after the first token temperature/topK/seed no
+     * longer apply and a small model is more prone to repetition (AI Edge Gallery also defaults off).
+     */
+    private val _speculative = MutableStateFlow(prefs.getBoolean(KEY_SPECULATIVE, false))
+    val speculative: StateFlow<Boolean> = _speculative.asStateFlow()
+
+    /** Whether the loaded engine runs with speculative decoding. */
+    @Volatile private var loadedSpeculative = false
+
+    /** Whether the model file has an MTP head (known after the first load). */
+    @Volatile private var speculativeSupported = false
+
+    /** Turns "빠른 생성" on or off; reloads only if that changes the GPU engine actually loaded. */
+    fun setSpeculative(spec: ModelSpec, file: File, enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_SPECULATIVE, enabled).commit()
+        _speculative.value = enabled
+        if (loadedBackend == BackendKind.GPU && speculativeSupported && enabled != loadedSpeculative) reload(spec, file)
+    }
+
     /** Loads the model if it is not loaded or loading yet. Safe to call repeatedly. */
     fun load(spec: ModelSpec, file: File) {
         val current = _state.value
@@ -134,36 +156,66 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
             return
         }
         purgeLegacyEngineCaches(spec)
-        logModelInfo(file)
+        speculativeSupported = logModelInfo(file)
 
-        val backends = if (cpuOnly) listOf(BackendKind.CPU) else listOf(BackendKind.GPU, BackendKind.CPU)
+        // GPU with speculative decoding (fastest), then plain GPU, then CPU. Speculative decoding
+        // gains little on CPU (model card), so it is only tried on GPU, and only once plain GPU has
+        // worked on this device, so a GPU fault is never mistaken for an MTP fault.
+        val gpuProven = prefs.getBoolean(KEY_GPU_OK, false)
+        val attempts = buildList {
+            if (!cpuOnly) {
+                if (speculativeSupported && _speculative.value && gpuProven) {
+                    add(LoadAttempt(BackendKind.GPU, speculative = true))
+                }
+                add(LoadAttempt(BackendKind.GPU, speculative = false))
+            }
+            add(LoadAttempt(BackendKind.CPU, speculative = false))
+        }
         var lastError: Throwable? = null
-        for (backend in backends) {
+        for (attempt in attempts) {
+            val backend = attempt.backend
             _state.value = EngineState.Loading(backend)
             // commit() (synchronous) so the marker survives if the process dies inside native code.
             prefs.edit()
-                .putString(KEY_LOADING_BACKEND, backend.name)
+                .putString(KEY_LOADING_BACKEND, attempt.marker)
                 .putLong(KEY_LOADING_AT, System.currentTimeMillis())
                 .commit()
             val candidate = Engine(engineConfigFor(backend, spec, file))
             val start = SystemClock.elapsedRealtime()
             try {
-                candidate.initialize()
+                // Read only while the Engine is created; reset right after, as AI Edge Gallery does.
+                @OptIn(ExperimentalApi::class)
+                ExperimentalFlags.enableSpeculativeDecoding = attempt.speculative
+                try {
+                    candidate.initialize()
+                } finally {
+                    @OptIn(ExperimentalApi::class)
+                    ExperimentalFlags.enableSpeculativeDecoding = null
+                }
                 clearLoadingMarker()
                 prefs.edit().remove(KEY_AUTOLOAD_BLOCKED).commit()
                 engine = candidate
                 loadedBackend = backend
+                loadedSpeculative = attempt.speculative
+                if (backend == BackendKind.GPU && !attempt.speculative) prefs.edit().putBoolean(KEY_GPU_OK, true).commit()
                 if (backend == BackendKind.CPU && lastError != null && notice == null) {
                     notice = EngineNotice.GPU_FAILED_FELL_BACK
                 }
                 val elapsed = SystemClock.elapsedRealtime() - start
-                Log.i(TAG, "Engine ready on $backend in ${elapsed}ms")
-                _state.value = EngineState.Ready(backend, elapsed, notice)
+                Log.i(TAG, "Engine ready on $backend (speculative=${attempt.speculative}) in ${elapsed}ms")
+                _state.value = EngineState.Ready(backend, elapsed, notice, speculative = attempt.speculative)
                 return
             } catch (t: Throwable) {
                 clearLoadingMarker()
-                Log.w(TAG, "Engine init failed on $backend", t)
-                lastError = t
+                Log.w(TAG, "Engine init failed on $backend (speculative=${attempt.speculative})", t)
+                if (attempt.speculative) {
+                    // Not a GPU failure (plain GPU follows). Remember it, so later loads skip the
+                    // failing attempt and the menu shows 빠른 생성 as off.
+                    prefs.edit().putBoolean(KEY_SPECULATIVE, false).commit()
+                    _speculative.value = false
+                } else {
+                    lastError = t
+                }
             }
         }
         _state.value =
@@ -179,12 +231,13 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
     private fun examinePreviousRun(): EngineNotice? {
         val inferAt = prefs.getLong(KEY_INFER_AT, 0L)
         if (inferAt != 0L) {
-            prefs.edit().remove(KEY_INFER_AT).commit()
+            val inferSpeculative = prefs.getBoolean(KEY_INFER_SPECULATIVE, false)
+            prefs.edit().remove(KEY_INFER_AT).remove(KEY_INFER_SPECULATIVE).commit()
             val exit = exitSince(inferAt)
             if (exit != null && isCrash(exit)) {
                 Log.i(TAG, "Previous GPU generation crashed: reason=${exit.reason} status=${exit.status}")
-                prefs.edit().putBoolean(KEY_GPU_DISABLED, true).commit()
-                return EngineNotice.GPU_DISABLED_AFTER_CRASH
+                // With speculative decoding on, turn that off first and keep the GPU.
+                return if (inferSpeculative) disableSpeculative() else disableGpu()
             }
         }
 
@@ -200,16 +253,25 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
         val wasVisible = exit.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE
         Log.i(TAG, "Previous load on $backend ended: reason=${exit.reason} status=${exit.status}")
         return when {
-            backend == BackendKind.GPU.name && (crashed || (killed && wasVisible)) -> {
-                prefs.edit().putBoolean(KEY_GPU_DISABLED, true).commit()
-                EngineNotice.GPU_DISABLED_AFTER_CRASH
-            }
+            backend == MARKER_GPU_SPECULATIVE && (crashed || (killed && wasVisible)) -> disableSpeculative()
+            backend == BackendKind.GPU.name && (crashed || (killed && wasVisible)) -> disableGpu()
             crashed || killed -> {
                 prefs.edit().putBoolean(KEY_AUTOLOAD_BLOCKED, true).commit()
                 EngineNotice.PREVIOUS_LOAD_CRASHED
             }
             else -> null
         }
+    }
+
+    private fun disableGpu(): EngineNotice {
+        prefs.edit().putBoolean(KEY_GPU_DISABLED, true).remove(KEY_GPU_OK).commit()
+        return EngineNotice.GPU_DISABLED_AFTER_CRASH
+    }
+
+    private fun disableSpeculative(): EngineNotice {
+        prefs.edit().putBoolean(KEY_SPECULATIVE, false).commit()
+        _speculative.value = false
+        return EngineNotice.SPECULATIVE_DISABLED_AFTER_CRASH
     }
 
     /** The first process exit recorded at or after [since]. */
@@ -262,18 +324,21 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
         prefs.edit().putBoolean(KEY_CACHE_V2, true).commit()
     }
 
-    private fun logModelInfo(file: File) {
+    /** Logs the file's metadata and returns whether it supports speculative decoding (MTP). */
+    private fun logModelInfo(file: File): Boolean =
         runCatching {
             ModelInfo.from(file.absolutePath).use { info ->
+                val llm = info as? ModelInfo.Llm
                 Log.i(
                     TAG,
                     "ModelInfo: maxContextTokens=${info.maxContextTokens()} " +
                         "dynamicContext=${info.isDynamicContext()} minRuntime=${info.minRuntimeVersion()} " +
-                        "supportsThinking=${(info as? ModelInfo.Llm)?.supportsThinking()}",
+                        "supportsThinking=${llm?.supportsThinking()} " +
+                        "speculative=${llm?.hasSpeculativeDecodingSupport()}",
                 )
+                llm?.hasSpeculativeDecodingSupport() == true
             }
-        }.onFailure { Log.w(TAG, "ModelInfo unavailable", it) }
-    }
+        }.onFailure { Log.w(TAG, "ModelInfo unavailable", it) }.getOrDefault(false)
 
     /**
      * Streams a response to [text]. The Conversation is created (or rebuilt) on demand with
@@ -348,7 +413,8 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
                         }
                         // GPU driver faults often surface on the first prefill, not at load time.
                         if (loadedBackend == BackendKind.GPU) {
-                            prefs.edit().putLong(KEY_INFER_AT, System.currentTimeMillis()).commit()
+                            prefs.edit().putLong(KEY_INFER_AT, System.currentTimeMillis())
+                                .putBoolean(KEY_INFER_SPECULATIVE, loadedSpeculative).commit()
                         }
                         synchronized(conversationLock) {
                             sentTo.set(conv)
@@ -470,6 +536,7 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
         engine?.let { eng -> runCatching { if (eng.isInitialized()) eng.close() } }
         engine = null
         loadedBackend = null
+        loadedSpeculative = false
     }
 
     private fun classifyLoadError(t: Throwable?): LlmError {
@@ -519,6 +586,9 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
         private const val KEY_GPU_DISABLED = "gpu_disabled"
         private const val KEY_AUTOLOAD_BLOCKED = "autoload_blocked"
         private const val KEY_INFER_AT = "gpu_infer_at"
+        private const val KEY_INFER_SPECULATIVE = "gpu_infer_speculative"
+        private const val KEY_SPECULATIVE = "speculative_decoding_v2"
+        private const val KEY_GPU_OK = "gpu_ok"
         private const val KEY_FORCE_CPU = "force_cpu"
         private const val KEY_CACHE_V2 = "engine_cache_v2"
 
@@ -545,3 +615,12 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
             listOf("Input token ids are too long", "maximum number of tokens", "exceeds available state entries")
     }
 }
+
+/** One way of creating the engine, tried in order until one initializes. */
+private data class LoadAttempt(val backend: BackendKind, val speculative: Boolean) {
+    /** Written before native init so a crash can be attributed to this attempt next launch. */
+    val marker: String
+        get() = if (speculative) MARKER_GPU_SPECULATIVE else backend.name
+}
+
+private const val MARKER_GPU_SPECULATIVE = "GPU_SPECULATIVE"

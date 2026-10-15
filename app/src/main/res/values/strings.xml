@@ -147,4 +147,7 @@
     <string name="usage_line">CPU %1$s  GPU %2$s  RAM %3$s</string>
     <string name="menu_force_cpu">CPU로만 실행</string>
     <string name="menu_force_cpu_desc">느리지만 답변이 깨질 때 시도해 보세요</string>
+    <string name="menu_speculative">빠른 생성 (MTP)</string>
+    <string name="menu_speculative_desc">GPU에서 더 빨리 답해요. 대신 항상 가장 그럴듯한 단어만 골라서 답이 덜 다양해지고 온도 설정이 거의 안 먹혀요</string>
+    <string name="notice_speculative_disabled">지난번 빠른 생성(MTP)을 쓰다가 앱이 종료되어 빠른 생성을 껐어요. 메뉴에서 다시 켤 수 있어요.</string>
 </resources>

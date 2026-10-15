@@ -56,6 +56,14 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
 
     val forceCpu: StateFlow<Boolean> = engine.forceCpu
 
+    val speculative: StateFlow<Boolean> = engine.speculative
+
+    fun setSpeculative(enabled: Boolean) {
+        if (chat.state.value.isGenerating) return
+        val found = _location.value as? ModelLocation.Found ?: return
+        engine.setSpeculative(spec, found.file, enabled)
+    }
+
     /** Polled only while the chat screen collects it; keeps the last CPU value across restarts. */
     val resourceUsage: StateFlow<ResourceUsage> =
         container.resourceMonitor.usage

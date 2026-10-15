@@ -12,6 +12,7 @@ import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Surface
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
@@ -19,6 +20,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
@@ -56,6 +59,7 @@ private fun RokiApp(vm: MainViewModel = viewModel(factory = MainViewModel.Factor
     val chatState by vm.chatState.collectAsStateWithLifecycle()
     val reasoningLevel by vm.reasoningLevel.collectAsStateWithLifecycle()
     val forceCpu by vm.forceCpu.collectAsStateWithLifecycle()
+    val speculative by vm.speculative.collectAsStateWithLifecycle()
 
     // Pick up a model pushed with adb (or space freed) while the app was in the background.
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refreshLocation() }
@@ -91,6 +95,16 @@ private fun RokiApp(vm: MainViewModel = viewModel(factory = MainViewModel.Factor
         }
         BackHandler(enabled = drawerState.isOpen) { scope.launch { drawerState.close() } }
 
+        // Opening the sidebar (button or swipe) dismisses the keyboard instead of leaving it up.
+        val keyboard = LocalSoftwareKeyboardController.current
+        val focusManager = LocalFocusManager.current
+        LaunchedEffect(drawerState.targetValue) {
+            if (drawerState.targetValue == DrawerValue.Open) {
+                keyboard?.hide()
+                focusManager.clearFocus()
+            }
+        }
+
         ModalNavigationDrawer(
             drawerState = drawerState,
             drawerContent = {
@@ -113,6 +127,7 @@ private fun RokiApp(vm: MainViewModel = viewModel(factory = MainViewModel.Factor
                 modelBroken = vm.isModelBroken(engineState),
                 gpuDisabled = vm.isGpuDisabled,
                 forceCpu = forceCpu,
+                speculative = speculative,
                 resourceUsage = resourceUsage,
                 memoryWarning = memoryWarning,
                 reasoningLevel = if (vm.spec.supportsThinking) reasoningLevel else null,
@@ -124,6 +139,7 @@ private fun RokiApp(vm: MainViewModel = viewModel(factory = MainViewModel.Factor
                 onRetryGpu = vm::retryWithGpu,
                 onRedownload = vm::deleteModelAndRedownload,
                 onForceCpuChange = vm::setForceCpu,
+                onSpeculativeChange = vm::setSpeculative,
                 onOpenDrawer = { scope.launch { drawerState.open() } },
             )
             }

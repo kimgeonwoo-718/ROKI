@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -20,6 +21,7 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DrawerDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -40,6 +42,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -62,7 +65,9 @@ fun ChatDrawer(
     var renaming by remember { mutableStateOf<ConversationEntity?>(null) }
     var deleting by remember { mutableStateOf<ConversationEntity?>(null) }
 
-    ModalDrawerSheet {
+    // 75% of the screen width, but never wider than Material's 360dp (landscape, tablets).
+    val sheetWidth = minOf(LocalConfiguration.current.screenWidthDp.dp * 0.75f, DrawerDefaults.MaximumDrawerWidth)
+    ModalDrawerSheet(modifier = Modifier.width(sheetWidth)) {
         Column(Modifier.padding(horizontal = 12.dp)) {
             Text(
                 stringResource(R.string.app_name),

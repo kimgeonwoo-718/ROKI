@@ -25,6 +25,9 @@ enum class EngineNotice {
 
     /** GPU initialization threw an error and the engine fell back to CPU. */
     GPU_FAILED_FELL_BACK,
+
+    /** The process died while using speculative decoding (빠른 생성), so it was turned off. */
+    SPECULATIVE_DISABLED_AFTER_CRASH,
 }
 
 sealed interface EngineState {
@@ -36,6 +39,8 @@ sealed interface EngineState {
         val backend: BackendKind,
         val loadMillis: Long,
         val notice: EngineNotice? = null,
+        /** Speculative decoding (MTP, "빠른 생성") is active. */
+        val speculative: Boolean = false,
     ) : EngineState
 
     data class Failed(val error: LlmError, val detail: String?, val notice: EngineNotice? = null) :

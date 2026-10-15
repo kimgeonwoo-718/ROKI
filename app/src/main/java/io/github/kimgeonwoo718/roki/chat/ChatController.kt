@@ -354,19 +354,29 @@ class ChatController(
         var budget =
             minOf((spec.maxNumTokens * CONTEXT_FILL_RATIO).toInt(), spec.maxNumTokens - reserveTokens(level)) -
                 answerReserve() - estimateTokens(systemPrompt()) - estimateTokens(outgoing(level, prompt))
-        val kept = ArrayDeque<ChatTurn>()
         val completed =
             _state.value.turns.filter {
                 (it.status == TurnStatus.DONE || it.status == TurnStatus.STOPPED) &&
                     it.response.isNotBlank() && !it.garbled
             }
+        // Hidden example exchanges that show the chosen political stance, replayed first when they
+        // fit, but never at the cost of the newest real exchange.
+        val examples = personalization.value.stanceExamples()
+        val exampleCost = examples.sumOf { (q, a) -> estimateTokens(q) + estimateTokens(a) }
+        val newestCost = completed.lastOrNull()?.let { estimateTokens(it.prompt) + estimateTokens(it.response) } ?: 0
+        val useExamples =
+            examples.isNotEmpty() && budget - exampleCost >= (if (newestCost <= budget) newestCost else 0)
+        if (useExamples) budget -= exampleCost
+        val kept = ArrayDeque<ChatTurn>()
         for (turn in completed.asReversed()) {
             val cost = estimateTokens(turn.prompt) + estimateTokens(turn.response)
             if (cost > budget) break
             budget -= cost
             kept.addFirst(turn)
         }
-        return kept.flatMap { listOf(Message.user(it.prompt), Message.model(it.response)) }
+        val exampleMessages =
+            if (useExamples) examples.flatMap { (q, a) -> listOf(Message.user(q), Message.model(a)) } else emptyList()
+        return exampleMessages + kept.flatMap { listOf(Message.user(it.prompt), Message.model(it.response)) }
     }
 
     /**
