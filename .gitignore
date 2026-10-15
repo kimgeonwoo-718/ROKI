@@ -3,6 +3,10 @@
 .env.*
 !.env.example
 
+# Model files (multi-GB, never commit)
+*.litertlm
+*.task
+
 # Dependencies / virtual envs
 node_modules/
 .venv/
@@ -13,6 +17,18 @@ __pycache__/
 # Build output
 dist/
 build/
+
+# Android / Gradle
+.gradle/
+.kotlin/
+local.properties
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
 
 # Logs
 *.log

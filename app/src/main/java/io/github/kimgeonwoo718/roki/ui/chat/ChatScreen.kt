@@ -1,0 +1,385 @@
+package io.github.kimgeonwoo718.roki.ui.chat
+
+import androidx.annotation.StringRes
+import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.outlined.AddComment
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import io.github.kimgeonwoo718.roki.R
+import io.github.kimgeonwoo718.roki.chat.ChatState
+import io.github.kimgeonwoo718.roki.chat.ChatTurn
+import io.github.kimgeonwoo718.roki.chat.TurnStatus
+import io.github.kimgeonwoo718.roki.llm.EngineNotice
+import io.github.kimgeonwoo718.roki.llm.EngineState
+import io.github.kimgeonwoo718.roki.llm.LlmError
+import io.github.kimgeonwoo718.roki.ui.formatRate
+import io.github.kimgeonwoo718.roki.ui.formatSeconds
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ChatScreen(
+    modelName: String,
+    engineState: EngineState,
+    chatState: ChatState,
+    modelBroken: Boolean,
+    gpuDisabled: Boolean,
+    memoryWarning: String?,
+    onSend: (String) -> Unit,
+    onStop: () -> Unit,
+    onNewChat: () -> Unit,
+    onRetryLoad: () -> Unit,
+    onRetryGpu: () -> Unit,
+    onRedownload: () -> Unit,
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(stringResource(R.string.app_name), fontWeight = FontWeight.Bold)
+                        Text(
+                            engineSubtitle(modelName, engineState),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
+                actions = {
+                    IconButton(onClick = onNewChat, enabled = chatState.turns.isNotEmpty()) {
+                        Icon(Icons.Outlined.AddComment, contentDescription = stringResource(R.string.chat_new))
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .consumeWindowInsets(padding)
+                .imePadding()
+        ) {
+            EngineBanner(
+                state = engineState,
+                modelBroken = modelBroken,
+                gpuDisabled = gpuDisabled,
+                generating = chatState.isGenerating,
+                memoryWarning = memoryWarning,
+                onRetryLoad = onRetryLoad,
+                onRetryGpu = onRetryGpu,
+                onRedownload = onRedownload,
+            )
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                if (chatState.turns.isEmpty()) {
+                    Text(
+                        stringResource(R.string.chat_empty),
+                        modifier = Modifier.align(Alignment.Center),
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    TurnList(chatState.turns)
+                }
+            }
+            InputBar(
+                enabled = engineState is EngineState.Ready,
+                hint = when (engineState) {
+                    is EngineState.Ready -> R.string.chat_input_hint
+                    is EngineState.Failed -> R.string.chat_input_hint_failed
+                    else -> R.string.chat_input_hint_loading
+                },
+                generating = chatState.isGenerating,
+                onSend = onSend,
+                onStop = onStop,
+            )
+        }
+    }
+}
+
+@Composable
+private fun engineSubtitle(modelName: String, state: EngineState): String =
+    when (state) {
+        is EngineState.Ready -> "$modelName · " + stringResource(R.string.engine_ready_backend, state.backend.name)
+        is EngineState.Loading -> stringResource(R.string.engine_preparing, state.backend.name)
+        is EngineState.Failed -> modelName
+        EngineState.Idle -> modelName
+    }
+
+@Composable
+private fun EngineBanner(
+    state: EngineState,
+    modelBroken: Boolean,
+    gpuDisabled: Boolean,
+    generating: Boolean,
+    memoryWarning: String?,
+    onRetryLoad: () -> Unit,
+    onRetryGpu: () -> Unit,
+    onRedownload: () -> Unit,
+) {
+    when (state) {
+        is EngineState.Loading -> LinearProgressIndicator(Modifier.fillMaxWidth())
+        is EngineState.Failed ->
+            BannerCard(error = true) {
+                Text(errorMessage(state.error), style = MaterialTheme.typography.bodyMedium)
+                state.notice?.let { Text(noticeMessage(it), style = MaterialTheme.typography.bodySmall) }
+                memoryWarning?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                state.detail?.let {
+                    Text(stringResource(R.string.error_detail, it), style = MaterialTheme.typography.labelSmall)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (modelBroken) {
+                        Button(onClick = onRedownload) { Text(stringResource(R.string.model_redownload)) }
+                    }
+                    OutlinedButton(onClick = onRetryLoad) { Text(stringResource(R.string.engine_retry)) }
+                    if (gpuDisabled) {
+                        TextButton(onClick = onRetryGpu) { Text(stringResource(R.string.engine_retry_gpu)) }
+                    }
+                }
+            }
+        is EngineState.Ready ->
+            // GPU stays off until the user re-enables it, so keep the way back visible.
+            if (state.notice != null || gpuDisabled) {
+                BannerCard(error = false) {
+                    Text(
+                        state.notice?.let { noticeMessage(it) } ?: stringResource(R.string.notice_gpu_off),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    if (gpuDisabled) {
+                        TextButton(onClick = onRetryGpu, enabled = !generating) {
+                            Text(stringResource(R.string.engine_retry_gpu))
+                        }
+                    }
+                }
+            }
+        EngineState.Idle -> Unit
+    }
+}
+
+@Composable
+private fun BannerCard(error: Boolean, content: @Composable () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        colors = CardDefaults.cardColors(
+            containerColor =
+                if (error) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer,
+        ),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { content() }
+    }
+}
+
+@Composable
+private fun TurnList(turns: List<ChatTurn>) {
+    val listState = rememberLazyListState()
+    val last = turns.lastOrNull()
+    // Follow the growing answer, but stop following once the user scrolls up to read;
+    // resume when they scroll back to the bottom or send a new message.
+    var followBottom by remember { mutableStateOf(true) }
+    val dragged by listState.interactionSource.collectIsDraggedAsState()
+    LaunchedEffect(dragged) { if (dragged) followBottom = false }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }
+            .collect { (scrolling, canScrollForward) -> if (!scrolling && !canScrollForward) followBottom = true }
+    }
+    var lastTurnCount by remember { mutableIntStateOf(turns.size) }
+    LaunchedEffect(turns.size, last?.response?.length, last?.status) {
+        if (turns.size != lastTurnCount) {
+            lastTurnCount = turns.size
+            followBottom = true
+        }
+        if (turns.isNotEmpty() && followBottom && !dragged) listState.scrollToItem(turns.lastIndex, Int.MAX_VALUE)
+    }
+    LazyColumn(
+        state = listState,
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(20.dp),
+    ) {
+        items(turns, key = { it.id }) { turn -> TurnItem(turn) }
+    }
+}
+
+@Composable
+private fun TurnItem(turn: ChatTurn) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        // User message: right-aligned bubble.
+        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+            Text(
+                turn.prompt,
+                modifier = Modifier
+                    .widthIn(max = 320.dp)
+                    .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(20.dp))
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                style = MaterialTheme.typography.bodyLarge,
+            )
+        }
+        // Assistant answer: plain body text, no bubble.
+        when {
+            turn.status == TurnStatus.WAITING ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.size(8.dp))
+                    Text(stringResource(R.string.chat_thinking), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            turn.response.isNotEmpty() ->
+                SelectionContainer {
+                    Text(turn.response, style = MaterialTheme.typography.bodyLarge)
+                }
+        }
+        if (turn.truncated) {
+            Text(
+                stringResource(R.string.chat_truncated),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (turn.status == TurnStatus.STOPPED) {
+            Text(
+                stringResource(R.string.chat_stopped),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (turn.status == TurnStatus.ERROR) {
+            Text(
+                errorMessage(turn.error ?: LlmError.GENERATION_FAILED),
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+        turnStats(turn)?.let {
+            Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+        }
+    }
+}
+
+@Composable
+private fun turnStats(turn: ChatTurn): String? {
+    val ttft = turn.ttftMillis ?: return null
+    if (turn.isActive) return null
+    val backend = turn.backend?.name ?: "-"
+    val rate = turn.tokensPerSecond
+    return if (rate != null) stringResource(R.string.chat_stats, formatSeconds(ttft), formatRate(rate), backend)
+    else stringResource(R.string.chat_stats_no_rate, formatSeconds(ttft), backend)
+}
+
+@Composable
+private fun InputBar(
+    enabled: Boolean,
+    @StringRes hint: Int,
+    generating: Boolean,
+    onSend: (String) -> Unit,
+    onStop: () -> Unit,
+) {
+    var text by rememberSaveable { mutableStateOf("") }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.Bottom,
+    ) {
+        OutlinedTextField(
+            value = text,
+            onValueChange = { text = it },
+            modifier = Modifier.weight(1f),
+            enabled = enabled,
+            placeholder = { Text(stringResource(hint)) },
+            maxLines = 6,
+            shape = RoundedCornerShape(24.dp),
+        )
+        Spacer(Modifier.size(8.dp))
+        if (generating) {
+            FilledIconButton(onClick = onStop, modifier = Modifier.padding(bottom = 4.dp)) {
+                Icon(Icons.Filled.Stop, contentDescription = stringResource(R.string.chat_stop))
+            }
+        } else {
+            FilledIconButton(
+                onClick = {
+                    onSend(text)
+                    text = ""
+                },
+                enabled = enabled && text.isNotBlank(),
+                modifier = Modifier.padding(bottom = 4.dp),
+            ) {
+                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = stringResource(R.string.chat_send))
+            }
+        }
+    }
+}
+
+@Composable
+fun errorMessage(error: LlmError): String =
+    stringResource(
+        when (error) {
+            LlmError.MODEL_MISSING -> R.string.error_model_missing
+            LlmError.MODEL_UNREADABLE -> R.string.error_model_unreadable
+            LlmError.MODEL_INCOMPLETE -> R.string.error_model_incomplete
+            LlmError.MODEL_CORRUPT -> R.string.error_model_corrupt
+            LlmError.NATIVE_LIBRARY -> R.string.error_native_library
+            LlmError.OUT_OF_MEMORY -> R.string.error_out_of_memory
+            LlmError.LOAD_FAILED -> R.string.error_load_failed
+            LlmError.GENERATION_FAILED -> R.string.error_generation_failed
+            LlmError.CONTEXT_FULL -> R.string.error_context_full
+        }
+    )
+
+@Composable
+fun noticeMessage(notice: EngineNotice): String =
+    stringResource(
+        when (notice) {
+            EngineNotice.GPU_DISABLED_AFTER_CRASH -> R.string.notice_gpu_disabled
+            EngineNotice.PREVIOUS_LOAD_CRASHED -> R.string.notice_previous_crash
+            EngineNotice.GPU_FAILED_FELL_BACK -> R.string.notice_gpu_fell_back
+        }
+    )
