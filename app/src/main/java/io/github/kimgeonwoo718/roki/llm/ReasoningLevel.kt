@@ -25,16 +25,17 @@ enum class ReasoningLevel(val thinks: Boolean, private val budget: Int, val effo
     VERY_HIGH(
         thinks = true,
         budget = 4096,
-        effortInstruction = "답하기 전에 단계별로 차근차근 풀고, 질문을 다르게 해석할 여지가 있는지 살피고, " +
-            "생각을 마치기 전에 결과에 실수가 없는지 확인하세요.",
+        // "생각 단계에서" / "답변에는 …만": without it the model wrote its checking into the answer.
+        effortInstruction = "생각 단계에서 차근차근 풀고, 질문을 다르게 해석할 여지가 있는지 살피고, " +
+            "결과에 실수가 없는지 확인한 뒤, 답변에는 검토 과정 없이 정리된 답만 쓰기",
     ),
 
     /** The cap is only a safety limit: an unlimited budget can loop until the KV cache fills. */
     MAX(
         thinks = true,
         budget = 8192,
-        effortInstruction = "답하기 전에 문제를 여러 부분으로 나눠 하나씩 풀고, 결과를 다른 방법으로 한 번 더 계산하거나 " +
-            "조건에 대입해서 검증한 뒤에 생각을 마치세요.",
+        effortInstruction = "생각 단계에서 문제를 여러 부분으로 나눠 하나씩 풀고, 결과를 다른 방법으로 한 번 더 계산하거나 " +
+            "조건에 대입해서 검증한 뒤, 답변에는 검토 과정 없이 정리된 답만 쓰기",
     );
 
     /** Clamped so thoughts can never take more than half of the KV cache. 0 when not thinking. */

@@ -113,19 +113,43 @@ class ChatController(
             topK = spec.defaultTopK,
             topP = spec.defaultTopP,
             thinkingEnabled = spec.supportsThinking && level?.thinks == true,
+            tolerantThoughtChannel = spec.supportsThinking,
         )
 
     /**
-     * The text actually sent: the level's effort instruction in front of the user's prompt.
-     * Sent per message (not in the system prompt) so changing the level never forces a full
-     * re-prefill of the history. ChatTurn.prompt and replayed history keep the raw prompt.
+     * The text actually sent: the level's effort instruction, a persona reminder and the app
+     * calculator's results in front of the user's prompt. Sent per message (not in the system
+     * prompt) so changing the level never forces a full re-prefill of the history.
+     * ChatTurn.prompt and replayed history keep the raw prompt.
      */
-    private fun outgoing(level: ReasoningLevel?, prompt: String): String {
-        val effort = level?.takeIf { it.thinks && spec.supportsThinking }?.effortInstruction
+    private fun outgoing(level: ReasoningLevel?, prompt: String, political: Boolean): String {
+        val calculation = Calculator.note(Calculator.evaluateAll(prompt), prompt)
+        // VERY_HIGH/MAX ask to recompute and verify, which contradicts "use the calculator's value".
+        val effort = level?.takeIf { it.thinks && spec.supportsThinking && calculation == null }?.effortInstruction
         // A short persona reminder per message: replayed earlier answers in the old style would
         // otherwise outweigh a changed system prompt for a small model.
-        val tags = listOfNotNull(effort, personalization.value.reminder().ifBlank { null }).joinToString(" / ")
-        return if (tags.isEmpty()) prompt else "[$tags]\n\n$prompt"
+        val persona = personalization.value.reminder(political).ifBlank { null }
+        val tags = listOfNotNull(effort, persona, calculation).joinToString(" / ")
+        // Typed control-token text ("<|channel>") would open the thought channel mid-prompt.
+        return if (tags.isEmpty()) defuse(prompt) else "[답변 지침: $tags]\n\n${defuse(prompt)}"
+    }
+
+    /**
+     * Whether turn [turnId] is about politics: a political message, or a follow-up ("왜?",
+     * "근거 더 말해봐") to a political turn, however many follow-ups in a row.
+     */
+    private fun isPoliticalTurn(turnId: Long): Boolean {
+        var followUps = MAX_FOLLOW_UPS + 1 // not after a political message yet
+        for (turn in _state.value.turns) {
+            followUps =
+                when {
+                    Personalization.isPolitical(turn.prompt) -> 0
+                    Personalization.isFollowUp(turn.prompt) -> followUps + 1
+                    else -> MAX_FOLLOW_UPS + 1
+                }
+            if (turn.id == turnId) return followUps <= MAX_FOLLOW_UPS
+        }
+        return false
     }
 
     /** Room kept free for the answer, sized to the chosen 답변길이. */
@@ -146,7 +170,7 @@ class ChatController(
     private fun systemPrompt(): String {
         // 설정 화면에서 바꾼 기본 지시가 있으면 그것을 쓰고, 성격·말투 등은 항상 덧붙인다.
         val base = appSettings.value.customSystemPrompt.take(AppSettings.MAX_SYSTEM_PROMPT_CHARS).ifBlank { DEFAULT_SYSTEM_PROMPT }
-        return "$base\n\n${personalization.value.systemInstructions()}"
+        return "$base\n\n$ANSWER_FORMAT\n\n${personalization.value.systemInstructions()}"
     }
 
     /** Takes effect from the next message. */
@@ -190,7 +214,7 @@ class ChatController(
                     Log.w(TAG, "Loading chat $id failed", e)
                     return@launch
                 }
-            _state.value = ChatState(turns = turns, conversationId = id)
+            _state.value = ChatState(turns = turns.map(::cleanArchived), conversationId = id)
             lastTurnThoughtChunks = 0
             engine.resetConversation()
         }
@@ -214,7 +238,7 @@ class ChatController(
         // rebuild trimmed up front instead of letting the answer be cut off when the cache fills.
         engine.tokenCount()?.let { used ->
             val effective = used - lastTurnThoughtChunks
-            if (effective + estimateTokens(outgoing(level, prompt)) + reserveTokens(level) > spec.maxNumTokens) {
+            if (effective + estimateTokens(outgoing(level, prompt, isPoliticalTurn(turnId))) + reserveTokens(level) > spec.maxNumTokens) {
                 engine.resetConversation()
             }
         }
@@ -245,14 +269,17 @@ class ChatController(
 
     /** Streams one attempt into the turn and returns how it ended (Done, Cancelled or Error). */
     private suspend fun generateOnce(turnId: Long, prompt: String, level: ReasoningLevel?): GenerationEvent? {
-        val history = historyMessages(prompt, level)
+        val sent = outgoing(level, prompt, isPoliticalTurn(turnId))
+        val history = historyMessages(sent, level)
         val sentAt = SystemClock.elapsedRealtimeNanos()
         var firstChunkAt = 0L
         var chunkCount = 0
         var outcome: GenerationEvent? = null
         val settings = settingsFor(level)
-        val sent = outgoing(level, prompt)
         val thinking = level?.takeIf { settings.thinkingEnabled }?.let { thinkingFor(it, sent) }
+        // Moves leaked reasoning to the thoughts, drops control tokens and turns LaTeX into text.
+        val filter = AnswerFilter()
+        lastAttemptLeaked = false
         // No hard output cap (답변길이 in 사용자 맞춤 설정 guides the length): an answer ends when
         // the model finishes or the KV cache fills, and the latter is flagged as truncated.
         engine.generate(sent, settings, history, maxOutputTokens = null, thinking = thinking).collect { event ->
@@ -261,27 +288,15 @@ class ChatController(
                     val now = SystemClock.elapsedRealtimeNanos()
                     if (firstChunkAt == 0L) firstChunkAt = now
                     chunkCount++
+                    val runtimeThought = event is GenerationEvent.Thought
+                    val out =
+                        if (event is GenerationEvent.Thought) AnswerFilter.Output(thought = filter.thought(event.text))
+                        else filter.answer((event as GenerationEvent.Chunk).text)
                     updateTurn(turnId) { turn ->
                         // A stopped turn ignores chunks that were already in flight.
                         if (!turn.isActive) return@updateTurn turn
                         val ttft = turn.ttftMillis ?: ((firstChunkAt - sentAt) / 1_000_000)
-                        if (event is GenerationEvent.Thought) {
-                            turn.copy(
-                                thinking = turn.thinking + event.text,
-                                thinkingStartedAt = turn.thinkingStartedAt ?: now,
-                                thoughtChunks = turn.thoughtChunks + 1,
-                                status = TurnStatus.STREAMING,
-                                ttftMillis = ttft,
-                            )
-                        } else {
-                            turn.copy(
-                                response = turn.response + (event as GenerationEvent.Chunk).text,
-                                status = TurnStatus.STREAMING,
-                                ttftMillis = ttft,
-                                thinkingMillis = turn.thinkingMillis
-                                    ?: turn.thinkingStartedAt?.let { (now - it) / 1_000_000 },
-                            )
-                        }
+                        turn.withOutput(out, now, runtimeThought).copy(status = TurnStatus.STREAMING, ttftMillis = ttft)
                     }
                 }
                 GenerationEvent.Done -> {
@@ -289,22 +304,60 @@ class ChatController(
                     val rate =
                         if (chunkCount > 1 && doneAt > firstChunkAt) (chunkCount - 1) / ((doneAt - firstChunkAt) / 1e9)
                         else null
+                    // Text held back by the filter (an unfinished "$…", a recovered answer).
+                    val tail = filter.finish()
+                    lastAttemptLeaked = filter.leaked || filter.recovered
                     updateTurn(turnId) { turn ->
                         if (!turn.isActive) turn
-                        else turn.copy(
-                            status = TurnStatus.DONE,
-                            tokensPerSecond = rate,
-                            thinkingMillis = turn.thinkingMillis
-                                ?: turn.thinkingStartedAt?.let { (doneAt - it) / 1_000_000 },
-                        )
+                        else turn.withOutput(tail, doneAt, runtimeThought = false).let {
+                            it.copy(
+                                status = TurnStatus.DONE,
+                                tokensPerSecond = rate,
+                                thinkingMillis = it.thinkingMillis
+                                    ?: it.thinkingStartedAt?.let { started -> (doneAt - started) / 1_000_000 },
+                            )
+                        }
                     }
                     outcome = event
                 }
                 else -> outcome = event
             }
         }
+        if (outcome is GenerationEvent.Error) {
+            // Keep what the filter still held (an unfinished "$…", a partial line) with the error.
+            // Not after a stop: that turn already shows its final state (or the restored answer).
+            val tail = filter.finish()
+            if (tail.answer.isNotEmpty() || tail.thought.isNotEmpty()) {
+                val now = SystemClock.elapsedRealtimeNanos()
+                updateTurn(turnId) { if (it.isActive) it.withOutput(tail, now, runtimeThought = false) else it }
+            }
+        }
         return outcome
     }
+
+    /**
+     * Adds filtered output to a streaming turn. Only the runtime's own thought chunks count as
+     * [ChatTurn.thoughtChunks] (the runtime removes those from the KV cache; leaked ones stay).
+     */
+    private fun ChatTurn.withOutput(out: AnswerFilter.Output, now: Long, runtimeThought: Boolean): ChatTurn {
+        var turn = this
+        if (runtimeThought) {
+            turn = turn.copy(thoughtChunks = turn.thoughtChunks + 1, thinkingStartedAt = turn.thinkingStartedAt ?: now)
+        }
+        if (out.thought.isNotEmpty()) {
+            turn = turn.copy(thinking = turn.thinking + out.thought, thinkingStartedAt = turn.thinkingStartedAt ?: now)
+        }
+        if (out.answer.isNotEmpty()) {
+            turn = turn.copy(
+                response = turn.response + out.answer,
+                thinkingMillis = turn.thinkingMillis ?: turn.thinkingStartedAt?.let { (now - it) / 1_000_000 },
+            )
+        }
+        return turn
+    }
+
+    /** The last finished attempt had control-token text or reasoning in its answer (see [AnswerFilter.leaked]). */
+    @Volatile private var lastAttemptLeaked = false
 
     /**
      * Flags a cut-off or garbled answer, and starts the next turn on a trimmed Conversation when the
@@ -313,18 +366,26 @@ class ChatController(
     private suspend fun afterDone(turnId: Long) {
         val turn = _state.value.turns.firstOrNull { it.id == turnId } ?: return
         lastTurnThoughtChunks = turn.thoughtChunks
-        val garbled = looksGarbled(turn)
-        if (garbled) {
-            Log.w(TAG, "Garbled answer on ${turn.backend}: foreign letters in the response")
-            updateTurn(turnId) { it.copy(garbled = true) }
-            // Do not let the broken text steer later answers.
-            engine.resetConversation()
-        }
-        val used = engine.tokenCount() ?: return
+        // Read before any reset below (a reset Conversation reports no count).
+        val used = engine.tokenCount()
         // Thinking used up the room (or the cap) before any answer came out.
         val noAnswer = turn.response.isBlank() && turn.thinking.isNotBlank()
-        if (used >= spec.maxNumTokens - 1 || noAnswer) updateTurn(turnId) { it.copy(truncated = true) }
-        if (!garbled && used - turn.thoughtChunks >= spec.maxNumTokens * CONTEXT_FILL_RATIO) engine.resetConversation()
+        if ((used != null && used >= spec.maxNumTokens - 1) || noAnswer) updateTurn(turnId) { it.copy(truncated = true) }
+        when {
+            looksGarbled(turn) -> {
+                Log.w(TAG, "Garbled answer on ${turn.backend}: foreign letters in the response")
+                updateTurn(turnId) { it.copy(garbled = true) }
+                // Do not let the broken text steer later answers.
+                engine.resetConversation()
+            }
+            lastAttemptLeaked -> {
+                // The KV cache holds the raw text (reasoning, control tokens) the screen does not
+                // show: rebuild from the cleaned history, or the model keeps imitating it.
+                Log.w(TAG, "Reasoning or control tokens leaked into the answer; rebuilding the conversation")
+                engine.resetConversation()
+            }
+            used != null && used - turn.thoughtChunks >= spec.maxNumTokens * CONTEXT_FILL_RATIO -> engine.resetConversation()
+        }
     }
 
     /** Stops generation immediately. The partial answer stays on screen and in the context. */
@@ -400,12 +461,12 @@ class ChatController(
      * newest first until the token budget runs out. Only answers are replayed (never thoughts,
      * as the Gemma 4 model card requires), and garbled answers are left out.
      */
-    private fun historyMessages(prompt: String, level: ReasoningLevel?): List<Message> {
+    private fun historyMessages(sent: String, level: ReasoningLevel?): List<Message> {
         // Below both reset thresholds (75% after a turn, reserve before a send) with an answer's
         // worth of margin, so a rebuilt Conversation does not trigger another reset right away.
         var budget =
             minOf((spec.maxNumTokens * CONTEXT_FILL_RATIO).toInt(), spec.maxNumTokens - reserveTokens(level)) -
-                answerReserve() - estimateTokens(systemPrompt()) - estimateTokens(outgoing(level, prompt))
+                answerReserve() - estimateTokens(systemPrompt()) - estimateTokens(sent)
         val completed =
             _state.value.turns.filter {
                 (it.status == TurnStatus.DONE || it.status == TurnStatus.STOPPED) &&
@@ -428,7 +489,7 @@ class ChatController(
         }
         val exampleMessages =
             if (useExamples) examples.flatMap { (q, a) -> listOf(Message.user(q), Message.model(a)) } else emptyList()
-        return exampleMessages + kept.flatMap { listOf(Message.user(it.prompt), Message.model(it.response)) }
+        return exampleMessages + kept.flatMap { listOf(Message.user(defuse(it.prompt)), Message.model(defuse(it.response))) }
     }
 
     /**
@@ -484,6 +545,43 @@ class ChatController(
             "당신은 ROKI입니다. 사용자의 휴대폰 안에서 인터넷 없이 동작하는 AI 어시스턴트입니다. " +
                 "모든 답변은 자연스러운 한국어로 작성하세요. 사용자가 다른 언어로 답해 달라고 직접 요청할 때만 그 언어를 쓰세요. " +
                 "코드, 고유명사, 널리 쓰이는 영어 약어는 원래 표기대로 써도 됩니다."
+
+        /**
+         * Always added after the (editable) base prompt. Small models otherwise write their analysis
+         * ("분석 1단계 … 최종 출력:") or LaTeX ("$a \times b$", shown raw) into the answer.
+         */
+        private const val ANSWER_FORMAT =
+            "답변에는 사용자에게 하는 말만 바로 쓰세요. 생각하고 검토한 과정은 답변에 넣지 않고, 사용자가 풀이를 원할 때만 풀이를 씁니다. " +
+                "계산은 '[답변 지침]'에 앱 계산기 결과가 있으면 그 값을 그대로 쓰세요. " +
+                "수식은 ×, ÷, ², √ 같은 일반 문자로 쓰세요."
+
+        /** Follow-ups ("왜?", "근거는?") in a row that still count as the political topic. */
+        private const val MAX_FOLLOW_UPS = 3
+
+        /** Gemma 4 control-token text ("<|channel>", "<turn|>") typed by the user or kept in old answers. */
+        private val CONTROL_TEXT = Regex("<\\|[a-z_]{1,20}\\|?>|<[a-z_]{1,20}\\|>")
+
+        /**
+         * Breaks control-token text with an invisible word joiner so the runtime never matches it:
+         * a typed "<|channel>" would otherwise open the thought channel in the middle of a prompt.
+         */
+        private fun defuse(text: String): String =
+            if ('|' !in text) text else CONTROL_TEXT.replace(text) { "<⁠" + it.value.substring(1) }
+
+        /** Answers saved by 0.3.0 may hold leaked reasoning or LaTeX: shown and replayed cleaned. */
+        private fun cleanArchived(turn: ChatTurn): ChatTurn {
+            if (turn.response.isEmpty()) return turn
+            val filter = AnswerFilter()
+            val streamed = filter.answer(turn.response)
+            val rest = filter.finish()
+            val answer = streamed.answer + rest.answer
+            val thought = streamed.thought + rest.thought
+            if (answer == turn.response && thought.isEmpty()) return turn
+            return turn.copy(
+                response = answer,
+                thinking = listOf(turn.thinking, thought).filter { it.isNotBlank() }.joinToString("\n\n"),
+            )
+        }
 
         /** Deliberately pessimistic (about one token per character) since there is no tokenizer API. */
         private fun estimateTokens(text: String): Int = text.length + 8

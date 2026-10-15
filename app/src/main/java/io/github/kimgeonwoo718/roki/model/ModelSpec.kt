@@ -57,7 +57,10 @@ object ModelCatalog {
             minDeviceMemoryGb = 8,
             defaultTopK = 64,
             defaultTopP = 0.95,
-            defaultTemperature = 1.0,
+            // Google's card says 1.0, but on this quantized 2B model 1.0 regularly samples a stray
+            // token (a Japanese/Chinese word in Korean text, "<|channel> thoughtful" instead of the
+            // thought header). 0.7 makes those far rarer and still varies 다시 생성.
+            defaultTemperature = 0.7,
         )
 
     /** Gated on Hugging Face: side-load only (see README). */

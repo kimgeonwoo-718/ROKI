@@ -9,6 +9,7 @@ import android.system.OsConstants
 import android.util.Log
 import com.google.ai.edge.litertlm.ActivationDataType
 import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Channel as ModelChannel
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.ConversationConfig
@@ -50,6 +51,15 @@ data class ConversationSettings(
     val topP: Double,
     /** "<|think|>" is rendered into the system turn once per Conversation, so this is a rebuild key. */
     val thinkingEnabled: Boolean,
+    /**
+     * Gemma 4 thoughts open with "<|channel>thought\n", and the model file's channel config only
+     * matches that exact text. When the model samples a different word after "<|channel>"
+     * ("<|channel> thoughtful…"), all of its reasoning ends up in the answer, uncapped by the
+     * thinking budget and left in the KV cache. Overriding the channel to start at "<|channel>"
+     * alone catches every variant; the name that follows stays in the thought text (AnswerFilter
+     * drops it). Named "thought", so the runtime still treats it as the reasoning channel.
+     */
+    val tolerantThoughtChannel: Boolean = false,
 )
 
 /**
@@ -513,6 +523,8 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
                     // Use ThinkingConfig, never extraContext["enable_thinking"]. Old thoughts are
                     // stripped from the KV cache by default (filterChannelContentFromKvCache).
                     thinkingConfig = if (settings.thinkingEnabled) ThinkingConfig(enableThinking = true) else null,
+                    // null keeps the model file's channels. The thinking budget uses the first channel.
+                    channels = if (settings.tolerantThoughtChannel) listOf(TOLERANT_THOUGHT_CHANNEL) else null,
                     // Prefill system prompt + replayed history now. Otherwise the first answer's
                     // thoughts make the runtime rewind to step 0 and re-prefill all of it on the
                     // second message. Runs on llmDispatcher, never the main thread.
@@ -594,6 +606,9 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
 
         /** Gemma 4's reasoning channel name (LlmMetadata channel_name). */
         const val THOUGHT_CHANNEL = "thought"
+
+        /** See [ConversationSettings.tolerantThoughtChannel]. */
+        private val TOLERANT_THOUGHT_CHANNEL = ModelChannel(THOUGHT_CHANNEL, "<|channel>", "<channel|>")
 
         private val FATAL_SIGNALS =
             intArrayOf(OsConstants.SIGSEGV, OsConstants.SIGBUS, OsConstants.SIGABRT, OsConstants.SIGILL, OsConstants.SIGFPE)

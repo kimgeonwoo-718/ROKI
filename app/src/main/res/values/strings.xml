@@ -74,6 +74,7 @@
     <string name="chat_input_hint_loading">모델 준비 중…</string>
     <string name="chat_input_hint_failed">모델을 불러오지 못했어요</string>
     <string name="chat_truncated">대화 길이 한도에 닿아서 답변이 중간에 끊겼어요. 다음 메시지부터는 오래된 대화 일부를 빼고 이어가요.</string>
+    <string name="chat_thought_only">생각만 하고 답변을 쓰지 못했어요. 다시 생성하거나 추론 수준을 낮춰 보세요.</string>
     <string name="chat_send">보내기</string>
     <string name="chat_stop">중지</string>
     <string name="chat_new">새 대화</string>

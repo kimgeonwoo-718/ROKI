@@ -420,7 +420,9 @@ private fun TurnItem(turn: ChatTurn, canRegenerate: Boolean, speculative: Boolea
         }
         if (turn.truncated) {
             Text(
-                stringResource(R.string.chat_truncated),
+                // Only thoughts and no answer: the thinking ran out or the model stopped inside it,
+                // which is not the context-length case.
+                stringResource(if (turn.response.isBlank()) R.string.chat_thought_only else R.string.chat_truncated),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
