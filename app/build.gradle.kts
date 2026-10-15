@@ -18,8 +18,8 @@ android {
         applicationId = "io.github.kimgeonwoo718.roki"
         minSdk = 31
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
 
         buildConfigField("String", "MODEL_ID", "\"$modelId\"")
         buildConfigField("String", "MODEL_DOWNLOAD_URL", "\"$modelDownloadUrl\"")
@@ -64,5 +64,6 @@ dependencies {
     implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.litertlm)
+    implementation(libs.markdown.renderer.m3)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

@@ -7,16 +7,20 @@ import android.os.Build
 import android.os.SystemClock
 import android.system.OsConstants
 import android.util.Log
+import com.google.ai.edge.litertlm.ActivationDataType
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.MessageCallback
 import com.google.ai.edge.litertlm.ModelInfo
 import com.google.ai.edge.litertlm.SamplerConfig
+import com.google.ai.edge.litertlm.ThinkingConfig
+import io.github.kimgeonwoo718.roki.BuildConfig
 import io.github.kimgeonwoo718.roki.model.ModelSpec
 import java.io.File
 import java.util.concurrent.CancellationException
@@ -43,6 +47,8 @@ data class ConversationSettings(
     val temperature: Double,
     val topK: Int,
     val topP: Double,
+    /** "<|think|>" is rendered into the system turn once per Conversation, so this is a rebuild key. */
+    val thinkingEnabled: Boolean,
 )
 
 /**
@@ -75,26 +81,44 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
     /** Bumped by stop()/resetConversation() so an in-flight generate() that has not sent yet bails out. */
     private val resetEpoch = AtomicInteger()
 
+    /** GPU turned off automatically after a crash (the user can re-enable it). */
     val isGpuDisabled: Boolean
         get() = prefs.getBoolean(KEY_GPU_DISABLED, false)
+
+    private val _forceCpu = MutableStateFlow(prefs.getBoolean(KEY_FORCE_CPU, false))
+
+    /** The user chose to run on CPU only. */
+    val forceCpu: StateFlow<Boolean> = _forceCpu.asStateFlow()
+
+    private val cpuOnly: Boolean
+        get() = isGpuDisabled || _forceCpu.value
 
     /** Loads the model if it is not loaded or loading yet. Safe to call repeatedly. */
     fun load(spec: ModelSpec, file: File) {
         val current = _state.value
         if (current is EngineState.Loading || current is EngineState.Ready) return
-        _state.value = EngineState.Loading(if (isGpuDisabled) BackendKind.CPU else BackendKind.GPU)
+        _state.value = EngineState.Loading(if (cpuOnly) BackendKind.CPU else BackendKind.GPU)
         appScope.launch(llmDispatcher) { loadBlocking(spec, file, userInitiated = false) }
     }
 
-    /** Re-enables GPU after it was disabled by a crash, and reloads the model. */
+    /** Re-enables GPU after it was disabled by a crash (and clears "CPU only"), then reloads. */
     fun retryWithGpu(spec: ModelSpec, file: File) {
-        prefs.edit().putBoolean(KEY_GPU_DISABLED, false).commit()
+        prefs.edit().putBoolean(KEY_GPU_DISABLED, false).putBoolean(KEY_FORCE_CPU, false).commit()
+        _forceCpu.value = false
         reload(spec, file)
+    }
+
+    /** Switches between "GPU first" and "CPU only"; reloads only if the backend actually changes. */
+    fun setForceCpu(spec: ModelSpec, file: File, enabled: Boolean) {
+        val before = cpuOnly
+        prefs.edit().putBoolean(KEY_FORCE_CPU, enabled).commit()
+        _forceCpu.value = enabled
+        if (cpuOnly != before) reload(spec, file)
     }
 
     /** User-requested reload (also clears an auto-load block left by a crash during loading). */
     fun reload(spec: ModelSpec, file: File) {
-        _state.value = EngineState.Loading(if (isGpuDisabled) BackendKind.CPU else BackendKind.GPU)
+        _state.value = EngineState.Loading(if (cpuOnly) BackendKind.CPU else BackendKind.GPU)
         resetEpoch.incrementAndGet()
         appScope.launch(llmDispatcher) {
             releaseBlocking()
@@ -109,9 +133,10 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
             _state.value = EngineState.Failed(LlmError.OUT_OF_MEMORY, null, EngineNotice.PREVIOUS_LOAD_CRASHED)
             return
         }
+        purgeLegacyEngineCaches(spec)
         logModelInfo(file)
 
-        val backends = if (isGpuDisabled) listOf(BackendKind.CPU) else listOf(BackendKind.GPU, BackendKind.CPU)
+        val backends = if (cpuOnly) listOf(BackendKind.CPU) else listOf(BackendKind.GPU, BackendKind.CPU)
         var lastError: Throwable? = null
         for (backend in backends) {
             _state.value = EngineState.Loading(backend)
@@ -120,17 +145,7 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
                 .putString(KEY_LOADING_BACKEND, backend.name)
                 .putLong(KEY_LOADING_AT, System.currentTimeMillis())
                 .commit()
-            val candidate =
-                Engine(
-                    EngineConfig(
-                        modelPath = file.absolutePath,
-                        backend = if (backend == BackendKind.GPU) Backend.GPU() else Backend.CPU(),
-                        visionBackend = null,
-                        audioBackend = null,
-                        maxNumTokens = spec.maxNumTokens,
-                        cacheDir = context.cacheDir.absolutePath,
-                    )
-                )
+            val candidate = Engine(engineConfigFor(backend, spec, file))
             val start = SystemClock.elapsedRealtime()
             try {
                 candidate.initialize()
@@ -219,13 +234,42 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
         prefs.edit().remove(KEY_INFER_AT).apply()
     }
 
+    private fun engineConfigFor(backend: BackendKind, spec: ModelSpec, file: File): EngineConfig {
+        val gpu = backend == BackendKind.GPU
+        // Cache file names carry no precision, so each backend/precision gets its own folder, which
+        // must exist beforehand (LiteRT-LM rejects a missing cacheDir).
+        val cacheDir = File(context.cacheDir, if (gpu) "litertlm/gpu-fp32" else "litertlm/cpu").apply { mkdirs() }
+        return EngineConfig(
+            modelPath = file.absolutePath,
+            backend = if (gpu) Backend.GPU() else Backend.CPU(),
+            visionBackend = null,
+            audioBackend = null,
+            maxNumTokens = spec.maxNumTokens,
+            cacheDir = cacheDir.absolutePath,
+            // GPU defaults to FLOAT16 activations, which garble Korean output with stray
+            // Japanese/Arabic/Cyrillic tokens (LiteRT-LM #3879, #2992) and lose rotary positions
+            // past 2048 (#3913). FLOAT32 fixes both; the CPU backend ignores this setting.
+            activationDataType = if (gpu) ActivationDataType.FLOAT32 else null,
+        )
+    }
+
+    /** Once: delete engine caches that stage 1 wrote straight into cacheDir (FP16 GPU programs). */
+    private fun purgeLegacyEngineCaches(spec: ModelSpec) {
+        if (prefs.getBoolean(KEY_CACHE_V2, false)) return
+        context.cacheDir.listFiles()
+            ?.filter { it.isFile && it.name.startsWith(spec.fileName) } // all LiteRT caches start with the model name
+            ?.forEach { runCatching { it.delete() } }
+        prefs.edit().putBoolean(KEY_CACHE_V2, true).commit()
+    }
+
     private fun logModelInfo(file: File) {
         runCatching {
             ModelInfo.from(file.absolutePath).use { info ->
                 Log.i(
                     TAG,
                     "ModelInfo: maxContextTokens=${info.maxContextTokens()} " +
-                        "dynamicContext=${info.isDynamicContext()} minRuntime=${info.minRuntimeVersion()}",
+                        "dynamicContext=${info.isDynamicContext()} minRuntime=${info.minRuntimeVersion()} " +
+                        "supportsThinking=${(info as? ModelInfo.Llm)?.supportsThinking()}",
                 )
             }
         }.onFailure { Log.w(TAG, "ModelInfo unavailable", it) }
@@ -240,6 +284,7 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
         settings: ConversationSettings,
         history: List<Message>,
         maxOutputTokens: Int?,
+        thinking: ThinkingConfig?,
     ): Flow<GenerationEvent> =
         callbackFlow {
             val epoch = resetEpoch.get()
@@ -262,8 +307,13 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
                             }
                             return
                         }
-                        // Only the main content; thinking/other channels live in message.channels.
+                        // Thoughts arrive as deltas in channels["thought"]; toString() is the answer only.
+                        val thought = message.channels[THOUGHT_CHANNEL]
+                        if (!thought.isNullOrEmpty()) trySend(GenerationEvent.Thought(thought))
                         val chunk = message.toString()
+                        if (BuildConfig.DEBUG && (chunk.isNotEmpty() || !thought.isNullOrEmpty())) {
+                            Log.d(RAW_TAG, if (thought.isNullOrEmpty()) "A:$chunk" else "T:$thought")
+                        }
                         if (chunk.isNotEmpty()) trySend(GenerationEvent.Chunk(chunk))
                     }
 
@@ -302,7 +352,13 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
                         }
                         synchronized(conversationLock) {
                             sentTo.set(conv)
-                            conv.sendMessageAsync(text, callback, maxOutputToken = maxOutputTokens)
+                            conv.sendMessageAsync(
+                                text,
+                                callback,
+                                maxOutputToken = maxOutputTokens,
+                                // Per-message budget; on/off itself is fixed per Conversation.
+                                thinkingConfig = thinking,
+                            )
                         }
                         // stop() raced the send: cancel what just started.
                         if (resetEpoch.get() != epoch) cancelCurrent()
@@ -388,8 +444,20 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
                         temperature = settings.temperature,
                         seed = (System.nanoTime() and 0x7fffffff).toInt(),
                     ),
+                    // Use ThinkingConfig, never extraContext["enable_thinking"]. Old thoughts are
+                    // stripped from the KV cache by default (filterChannelContentFromKvCache).
+                    thinkingConfig = if (settings.thinkingEnabled) ThinkingConfig(enableThinking = true) else null,
+                    // Prefill system prompt + replayed history now. Otherwise the first answer's
+                    // thoughts make the runtime rewind to step 0 and re-prefill all of it on the
+                    // second message. Runs on llmDispatcher, never the main thread.
+                    prefillPrefaceOnInit = true,
                 )
             )
+        if (BuildConfig.DEBUG) {
+            @OptIn(ExperimentalApi::class)
+            runCatching { created.renderPrefaceIntoString() }
+                .onSuccess { Log.d(TAG, "Preface has <|think|>=${it.contains("<|think|>")}:\n$it") }
+        }
         conversation = created
         conversationSettings = settings
         conversationPoisoned = false
@@ -444,12 +512,18 @@ class LlmEngineManager(private val context: Context, private val appScope: Corou
 
     companion object {
         private const val TAG = "LlmEngine"
+        private const val RAW_TAG = "LlmRaw"
         private const val PREFS = "llm_engine"
         private const val KEY_LOADING_BACKEND = "loading_backend"
         private const val KEY_LOADING_AT = "loading_at"
         private const val KEY_GPU_DISABLED = "gpu_disabled"
         private const val KEY_AUTOLOAD_BLOCKED = "autoload_blocked"
         private const val KEY_INFER_AT = "gpu_infer_at"
+        private const val KEY_FORCE_CPU = "force_cpu"
+        private const val KEY_CACHE_V2 = "engine_cache_v2"
+
+        /** Gemma 4's reasoning channel name (LlmMetadata channel_name). */
+        const val THOUGHT_CHANNEL = "thought"
 
         private val FATAL_SIGNALS =
             intArrayOf(OsConstants.SIGSEGV, OsConstants.SIGBUS, OsConstants.SIGABRT, OsConstants.SIGILL, OsConstants.SIGFPE)

@@ -23,6 +23,8 @@ data class ModelSpec(
      * history, new input and output) must fit. When it fills mid-answer the reply just ends.
      */
     val maxNumTokens: Int,
+    /** Gemma 4 has a "thought" channel (reasoning); Gemma 3n does not. */
+    val supportsThinking: Boolean,
     val minDeviceMemoryGb: Int,
     val defaultTopK: Int,
     val defaultTopP: Double,
@@ -49,8 +51,9 @@ object ModelCatalog {
             hfCommit = "6e5c4f1e395deb959c494953478fa5cec4b8008f",
             gated = false,
             // The file supports up to 32K. Must be set explicitly: null means 4096 on Android GPU.
-            // Starting at 8K until memory use on the device is measured.
-            maxNumTokens = 8192,
+            // 16K leaves room for the highest reasoning budget (8K) plus history and the answer.
+            maxNumTokens = 16384,
+            supportsThinking = true,
             minDeviceMemoryGb = 8,
             defaultTopK = 64,
             defaultTopP = 0.95,
@@ -69,6 +72,7 @@ object ModelCatalog {
             hfCommit = "ba9ca88da013b537b6ed38108be609b8db1c3a16",
             gated = true,
             maxNumTokens = 4096,
+            supportsThinking = false,
             minDeviceMemoryGb = 8,
             defaultTopK = 64,
             defaultTopP = 0.95,
@@ -87,6 +91,7 @@ object ModelCatalog {
             hfCommit = "297ed75955702dec3503e00c2c2ecbbf475300bc",
             gated = true,
             maxNumTokens = 4096,
+            supportsThinking = false,
             minDeviceMemoryGb = 12,
             defaultTopK = 64,
             defaultTopP = 0.95,

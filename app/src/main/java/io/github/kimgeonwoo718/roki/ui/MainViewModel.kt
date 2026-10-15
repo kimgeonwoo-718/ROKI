@@ -11,6 +11,7 @@ import io.github.kimgeonwoo718.roki.chat.ChatState
 import io.github.kimgeonwoo718.roki.download.DownloadState
 import io.github.kimgeonwoo718.roki.llm.EngineState
 import io.github.kimgeonwoo718.roki.llm.LlmError
+import io.github.kimgeonwoo718.roki.llm.ReasoningLevel
 import io.github.kimgeonwoo718.roki.model.ModelLocation
 import io.github.kimgeonwoo718.roki.model.ModelSpec
 import kotlinx.coroutines.Dispatchers
@@ -48,6 +49,18 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
 
     val isGpuDisabled: Boolean
         get() = engine.isGpuDisabled
+
+    val forceCpu: StateFlow<Boolean> = engine.forceCpu
+
+    val reasoningLevel: StateFlow<ReasoningLevel> = chat.reasoningLevel
+
+    fun setReasoningLevel(level: ReasoningLevel) = chat.setReasoningLevel(level)
+
+    fun setForceCpu(enabled: Boolean) {
+        if (chat.state.value.isGenerating) return
+        val found = _location.value as? ModelLocation.Found ?: return
+        engine.setForceCpu(spec, found.file, enabled)
+    }
 
     init {
         refreshLocation()

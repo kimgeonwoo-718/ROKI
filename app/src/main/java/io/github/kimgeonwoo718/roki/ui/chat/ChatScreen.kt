@@ -23,12 +23,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.outlined.AddComment
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
@@ -47,6 +51,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -59,9 +64,11 @@ import io.github.kimgeonwoo718.roki.R
 import io.github.kimgeonwoo718.roki.chat.ChatState
 import io.github.kimgeonwoo718.roki.chat.ChatTurn
 import io.github.kimgeonwoo718.roki.chat.TurnStatus
+import io.github.kimgeonwoo718.roki.llm.BackendKind
 import io.github.kimgeonwoo718.roki.llm.EngineNotice
 import io.github.kimgeonwoo718.roki.llm.EngineState
 import io.github.kimgeonwoo718.roki.llm.LlmError
+import io.github.kimgeonwoo718.roki.llm.ReasoningLevel
 import io.github.kimgeonwoo718.roki.ui.formatRate
 import io.github.kimgeonwoo718.roki.ui.formatSeconds
 
@@ -73,14 +80,20 @@ fun ChatScreen(
     chatState: ChatState,
     modelBroken: Boolean,
     gpuDisabled: Boolean,
+    forceCpu: Boolean,
     memoryWarning: String?,
+    /** null when the model has no reasoning (thinking) support. */
+    reasoningLevel: ReasoningLevel?,
+    onReasoningLevelChange: (ReasoningLevel) -> Unit,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
     onNewChat: () -> Unit,
     onRetryLoad: () -> Unit,
     onRetryGpu: () -> Unit,
     onRedownload: () -> Unit,
+    onForceCpuChange: (Boolean) -> Unit,
 ) {
+    var menuOpen by remember { mutableStateOf(false) }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -97,6 +110,31 @@ fun ChatScreen(
                 actions = {
                     IconButton(onClick = onNewChat, enabled = chatState.turns.isNotEmpty()) {
                         Icon(Icons.Outlined.AddComment, contentDescription = stringResource(R.string.chat_new))
+                    }
+                    Box {
+                        IconButton(onClick = { menuOpen = true }) {
+                            Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.menu_more))
+                        }
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(stringResource(R.string.menu_force_cpu))
+                                        Text(
+                                            stringResource(R.string.menu_force_cpu_desc),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                },
+                                trailingIcon = { Checkbox(checked = forceCpu, onCheckedChange = null) },
+                                enabled = !chatState.isGenerating && engineState !is EngineState.Loading,
+                                onClick = {
+                                    menuOpen = false
+                                    onForceCpuChange(!forceCpu)
+                                },
+                            )
+                        }
                     }
                 },
             )
@@ -139,6 +177,8 @@ fun ChatScreen(
                     else -> R.string.chat_input_hint_loading
                 },
                 generating = chatState.isGenerating,
+                reasoningLevel = reasoningLevel,
+                onReasoningLevelChange = onReasoningLevelChange,
                 onSend = onSend,
                 onStop = onStop,
             )
@@ -227,12 +267,21 @@ private fun TurnList(turns: List<ChatTurn>) {
     var followBottom by remember { mutableStateOf(true) }
     val dragged by listState.interactionSource.collectIsDraggedAsState()
     LaunchedEffect(dragged) { if (dragged) followBottom = false }
+    val currentTurns by rememberUpdatedState(turns)
     LaunchedEffect(listState) {
         snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }
-            .collect { (scrolling, canScrollForward) -> if (!scrolling && !canScrollForward) followBottom = true }
+            .collect { (scrolling, canScrollForward) ->
+                if (scrolling) return@collect
+                if (!canScrollForward) {
+                    followBottom = true
+                } else if (followBottom && currentTurns.isNotEmpty()) {
+                    // Content grew after the last scroll (async Markdown parse, stats line): catch up.
+                    listState.scrollToItem(currentTurns.lastIndex, Int.MAX_VALUE)
+                }
+            }
     }
     var lastTurnCount by remember { mutableIntStateOf(turns.size) }
-    LaunchedEffect(turns.size, last?.response?.length, last?.status) {
+    LaunchedEffect(turns.size, last?.response?.length, last?.thinking?.length, last?.status) {
         if (turns.size != lastTurnCount) {
             lastTurnCount = turns.size
             followBottom = true
@@ -264,18 +313,24 @@ private fun TurnItem(turn: ChatTurn) {
                 style = MaterialTheme.typography.bodyLarge,
             )
         }
-        // Assistant answer: plain body text, no bubble.
+        // Assistant: optional reasoning, then the answer as Markdown body text without a bubble.
+        if (turn.thinking.isNotEmpty()) ThinkingSection(turn)
         when {
-            turn.status == TurnStatus.WAITING ->
+            turn.isActive && turn.response.isEmpty() && turn.thinking.isEmpty() ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.size(8.dp))
                     Text(stringResource(R.string.chat_thinking), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             turn.response.isNotEmpty() ->
-                SelectionContainer {
-                    Text(turn.response, style = MaterialTheme.typography.bodyLarge)
-                }
+                SelectionContainer { MarkdownText(turn.response, streaming = turn.isActive) }
+        }
+        if (turn.garbled) {
+            Text(
+                stringResource(if (turn.backend == BackendKind.GPU) R.string.chat_garbled_gpu else R.string.chat_garbled),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.error,
+            )
         }
         if (turn.truncated) {
             Text(
@@ -308,10 +363,12 @@ private fun TurnItem(turn: ChatTurn) {
 private fun turnStats(turn: ChatTurn): String? {
     val ttft = turn.ttftMillis ?: return null
     if (turn.isActive) return null
-    val backend = turn.backend?.name ?: "-"
-    val rate = turn.tokensPerSecond
-    return if (rate != null) stringResource(R.string.chat_stats, formatSeconds(ttft), formatRate(rate), backend)
-    else stringResource(R.string.chat_stats_no_rate, formatSeconds(ttft), backend)
+    val parts = mutableListOf(stringResource(R.string.stats_ttft, formatSeconds(ttft)))
+    turn.thinkingMillis?.let { parts += stringResource(R.string.stats_thinking, formatSeconds(it)) }
+    turn.tokensPerSecond?.let { parts += stringResource(R.string.stats_rate, formatRate(it)) }
+    turn.reasoningLevel?.let { parts += stringResource(R.string.stats_reasoning, stringResource(it.labelRes())) }
+    parts += turn.backend?.name ?: "-"
+    return parts.joinToString(" · ")
 }
 
 @Composable
@@ -319,14 +376,21 @@ private fun InputBar(
     enabled: Boolean,
     @StringRes hint: Int,
     generating: Boolean,
+    reasoningLevel: ReasoningLevel?,
+    onReasoningLevelChange: (ReasoningLevel) -> Unit,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
 ) {
     var text by rememberSaveable { mutableStateOf("") }
+    if (reasoningLevel != null) {
+        Box(Modifier.padding(start = 16.dp)) {
+            ReasoningSelector(level = reasoningLevel, enabled = !generating, onChange = onReasoningLevelChange)
+        }
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(start = 12.dp, end = 12.dp, bottom = 8.dp),
         verticalAlignment = Alignment.Bottom,
     ) {
         OutlinedTextField(

@@ -44,6 +44,10 @@ sealed interface EngineState {
 
 /** Streaming events for one model response. */
 sealed interface GenerationEvent {
+    /** A piece of the model's reasoning (thinking), streamed before the answer. */
+    data class Thought(val text: String) : GenerationEvent
+
+    /** A piece of the answer. */
     data class Chunk(val text: String) : GenerationEvent
 
     data object Done : GenerationEvent

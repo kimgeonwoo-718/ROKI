@@ -21,5 +21,8 @@ class AppContainer(context: Context) {
     val modelStorage = ModelStorage(appContext)
     val downloadManager = ModelDownloadManager(appContext, modelStorage)
     val engineManager = LlmEngineManager(appContext, appScope)
-    val chatController = ChatController(engineManager, appScope, modelSpec)
+
+    /** Small user preferences until the stage-4 settings screen (DataStore) replaces them. */
+    private val settingsPrefs = appContext.getSharedPreferences("roki_settings", Context.MODE_PRIVATE)
+    val chatController = ChatController(engineManager, appScope, modelSpec, settingsPrefs)
 }

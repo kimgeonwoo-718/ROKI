@@ -42,6 +42,8 @@ private fun RokiApp(vm: MainViewModel = viewModel(factory = MainViewModel.Factor
     val freeBytes by vm.freeBytes.collectAsStateWithLifecycle()
     val engineState by vm.engineState.collectAsStateWithLifecycle()
     val chatState by vm.chatState.collectAsStateWithLifecycle()
+    val reasoningLevel by vm.reasoningLevel.collectAsStateWithLifecycle()
+    val forceCpu by vm.forceCpu.collectAsStateWithLifecycle()
 
     // Pick up a model pushed with adb (or space freed) while the app was in the background.
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refreshLocation() }
@@ -58,13 +60,17 @@ private fun RokiApp(vm: MainViewModel = viewModel(factory = MainViewModel.Factor
             chatState = chatState,
             modelBroken = vm.isModelBroken(engineState),
             gpuDisabled = vm.isGpuDisabled,
+            forceCpu = forceCpu,
             memoryWarning = memoryWarning,
+            reasoningLevel = if (vm.spec.supportsThinking) reasoningLevel else null,
+            onReasoningLevelChange = vm::setReasoningLevel,
             onSend = vm::send,
             onStop = vm::stop,
             onNewChat = vm::newChat,
             onRetryLoad = vm::retryLoad,
             onRetryGpu = vm::retryWithGpu,
             onRedownload = vm::deleteModelAndRedownload,
+            onForceCpuChange = vm::setForceCpu,
         )
     } else {
         ModelSetupScreen(
